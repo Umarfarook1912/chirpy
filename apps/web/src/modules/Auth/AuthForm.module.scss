@@ -1,0 +1,21 @@
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  width: 100%;
+}
+
+.rootError {
+  font-size: var(--font-size-sm);
+  color: var(--color-error);
+  background-color: rgb(239 68 68 / 0.08);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid rgb(239 68 68 / 0.3);
+}
+
+.switchLink {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  text-align: center;
+}

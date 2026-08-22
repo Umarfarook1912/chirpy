@@ -1,0 +1,62 @@
+.popup {
+  width: 320px;
+  min-height: 200px;
+  background: #faf8fc;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  background: #fff;
+  border-bottom: 1px solid #e8dfec;
+  padding: 12px 16px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.brandLogo {
+  width: 28px;
+  height: 28px;
+  background: #c47be4;
+  color: #fff;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.brandName {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1f1724;
+  letter-spacing: 0.5px;
+}
+
+.main {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sectionTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: #6f6475;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
+.hint {
+  font-size: 12px;
+  color: #6f6475;
+  line-height: 1.5;
+  text-align: center;
+}

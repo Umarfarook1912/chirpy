@@ -1,0 +1,133 @@
+.container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  background: #fff;
+  border: 1px solid #e8dfec;
+  border-radius: 12px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #6f6475;
+  flex-shrink: 0;
+}
+
+.dotRecording {
+  background: #ef4444;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.dotCompleted {
+  background: #22c55e;
+}
+
+.dotError {
+  background: #f59e0b;
+}
+
+.statusLabel {
+  font-size: 13px;
+  font-weight: 500;
+  color: #1f1724;
+  flex: 1;
+}
+
+.timer {
+  font-size: 12px;
+  color: #ef4444;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.error {
+  font-size: 12px;
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+.startButton, .stopButton, .resetButton, .disabledButton {
+  flex: 1;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: background-color 150ms;
+}
+
+.startButton {
+  background: #c47be4;
+  color: #fff;
+}
+
+.startButton:hover {
+  background: #a85ccb;
+}
+
+.stopButton {
+  background: #ef4444;
+  color: #fff;
+}
+
+.stopButton:hover {
+  background: #dc2626;
+}
+
+.resetButton {
+  background: #faf8fc;
+  color: #1f1724;
+  border: 1px solid #e8dfec;
+}
+
+.resetButton:hover {
+  background: #e8dfec;
+}
+
+.disabledButton {
+  background: #faf8fc;
+  color: #6f6475;
+  border: 1px solid #e8dfec;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #e8dfec;
+  border-top-color: #c47be4;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
