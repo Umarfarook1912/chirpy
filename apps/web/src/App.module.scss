@@ -8,6 +8,10 @@
   min-width: 0;
   background-color: var(--color-background);
   overflow-y: auto;
+
+  @media (max-width: 768px) {
+    width: 100%;
+  }
 }
 
 .loadingScreen {
