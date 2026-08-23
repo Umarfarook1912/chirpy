@@ -1,21 +1,28 @@
-import { RECORDING_CONFIG, RECORDING_ERRORS, getRecordingFileName } from '@chirpy/shared';
+import { RECORDING_CONFIG, RECORDING_ERRORS } from '@chirpy/shared';
 import { RecordingStateMachine } from './RecordingState';
 import { captureDisplayMedia, getSupportedMimeType, stopStream } from './StreamCapture';
 import type { RecordingStatus } from '@chirpy/shared';
 
 export type RecordingStateChangeCallback = (status: RecordingStatus, errorMessage?: string) => void;
 
+export interface RecordingStopResult {
+  recordingKey: string;
+  mimeType: string;
+  blob: Blob;
+}
+
 export class RecordingService {
   private stateMachine = new RecordingStateMachine();
   private mediaRecorder: MediaRecorder | null = null;
   private stream: MediaStream | null = null;
   private chunks: Blob[] = [];
-  private startTime: number | null = null;
   private elapsedTimer: ReturnType<typeof setInterval> | null = null;
   private elapsedSeconds = 0;
   private onStateChange: RecordingStateChangeCallback;
   private onElapsedUpdate: (seconds: number) => void;
   private meetingTitle: string;
+  private sessionId = '';
+  private mimeType = 'video/webm';
 
   constructor(
     onStateChange: RecordingStateChangeCallback,
@@ -27,6 +34,11 @@ export class RecordingService {
     this.meetingTitle = meetingTitle;
   }
 
+  setSessionContext(sessionId: string, meetingTitle?: string): void {
+    this.sessionId = sessionId;
+    if (meetingTitle) this.meetingTitle = meetingTitle;
+  }
+
   get status(): RecordingStatus {
     return this.stateMachine.status;
   }
@@ -36,8 +48,8 @@ export class RecordingService {
     this.onStateChange('requesting');
 
     try {
-      const mimeType = getSupportedMimeType();
-      if (!mimeType) {
+      this.mimeType = getSupportedMimeType();
+      if (!this.mimeType) {
         throw new Error(RECORDING_ERRORS.NOT_SUPPORTED);
       }
 
@@ -51,7 +63,7 @@ export class RecordingService {
       });
 
       this.mediaRecorder = new MediaRecorder(this.stream, {
-        mimeType,
+        mimeType: this.mimeType,
         videoBitsPerSecond: RECORDING_CONFIG.VIDEO_BITS_PER_SECOND,
         audioBitsPerSecond: RECORDING_CONFIG.AUDIO_BITS_PER_SECOND,
       });
@@ -67,7 +79,6 @@ export class RecordingService {
       };
 
       this.mediaRecorder.start(RECORDING_CONFIG.TIMESLICE_MS);
-      this.startTime = Date.now();
       this.elapsedSeconds = 0;
 
       this.elapsedTimer = setInterval(() => {
@@ -85,7 +96,7 @@ export class RecordingService {
     }
   }
 
-  async stop(): Promise<string | null> {
+  async stop(): Promise<RecordingStopResult | null> {
     if (!this.stateMachine.transition('stopping')) return null;
     this.onStateChange('stopping');
 
@@ -99,16 +110,18 @@ export class RecordingService {
       }
 
       this.mediaRecorder.onstop = () => {
-        const blob = new Blob(this.chunks, { type: 'video/webm' });
-        const url = URL.createObjectURL(blob);
-        const fileName = getRecordingFileName(this.meetingTitle);
+        const blob = new Blob(this.chunks, { type: this.mimeType });
+        const recordingKey = crypto.randomUUID();
 
         this.cleanup();
         this.stateMachine.transition('completed');
         this.onStateChange('completed');
 
-        resolve(url);
-        void this.triggerDownload(url, fileName);
+        resolve({
+          recordingKey,
+          mimeType: this.mimeType,
+          blob,
+        });
       };
 
       this.mediaRecorder.stop();
@@ -121,12 +134,12 @@ export class RecordingService {
     this.onStateChange('idle');
   }
 
-  private triggerDownload(url: string, fileName: string): void {
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = fileName;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  getSessionId(): string {
+    return this.sessionId;
+  }
+
+  getMeetingTitle(): string {
+    return this.meetingTitle;
   }
 
   private handleError(message: string): void {
@@ -146,7 +159,6 @@ export class RecordingService {
     }
     this.mediaRecorder = null;
     this.chunks = [];
-    this.startTime = null;
     this.elapsedSeconds = 0;
   }
 }

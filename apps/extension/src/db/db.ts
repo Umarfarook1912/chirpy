@@ -1,6 +1,11 @@
 import Dexie, { type EntityTable } from 'dexie';
 import { EXTENSION_CONSTANTS } from '../constants/extension.constants';
 
+if (typeof globalThis.indexedDB !== 'undefined') {
+  Dexie.dependencies.indexedDB = globalThis.indexedDB;
+  Dexie.dependencies.IDBKeyRange = globalThis.IDBKeyRange;
+}
+
 export interface LocalInteraction {
   id?: number;
   sessionId: string;
@@ -19,6 +24,7 @@ export interface SyncQueueItem {
   createdAt: number;
   lastAttemptAt?: number;
   error?: string;
+  meetingId?: string;
 }
 
 export interface LocalSession {
@@ -32,17 +38,40 @@ export interface LocalSession {
   synced: boolean;
 }
 
+export interface StoredRecording {
+  id?: number;
+  recordingKey: string;
+  sessionId: string;
+  meetingTitle: string;
+  mimeType: string;
+  blob: Blob;
+  createdAt: number;
+}
+
 class ChirpyDatabase extends Dexie {
   interactions!: EntityTable<LocalInteraction, 'id'>;
   syncQueue!: EntityTable<SyncQueueItem, 'id'>;
   sessions!: EntityTable<LocalSession, 'id'>;
+  recordings!: EntityTable<StoredRecording, 'id'>;
 
   constructor() {
     super(EXTENSION_CONSTANTS.DB_NAME);
-    this.version(EXTENSION_CONSTANTS.DB_VERSION).stores({
+    this.version(1).stores({
       interactions: '++id, sessionId, type, timestamp',
       syncQueue: '++id, idempotencyKey, status, createdAt',
       sessions: '++id, sessionId, externalMeetingId, synced',
+    });
+    this.version(2).stores({
+      interactions: '++id, sessionId, type, timestamp',
+      syncQueue: '++id, idempotencyKey, status, createdAt',
+      sessions: '++id, sessionId, externalMeetingId, synced',
+      recordings: '++id, recordingKey, sessionId, createdAt',
+    });
+    this.version(EXTENSION_CONSTANTS.DB_VERSION).stores({
+      interactions: '++id, sessionId, type, timestamp',
+      syncQueue: '++id, idempotencyKey, status, createdAt, meetingId',
+      sessions: '++id, sessionId, externalMeetingId, synced',
+      recordings: '++id, recordingKey, sessionId, createdAt',
     });
   }
 }

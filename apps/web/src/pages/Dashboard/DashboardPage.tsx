@@ -1,4 +1,5 @@
 import { Users, Video, BarChart3, TrendingUp } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { Typography } from '../../ui/atoms/Typography';
 import { StatCard } from '../../ui/molecules/StatCard';
 import { EmptyState } from '../../ui/molecules/EmptyState';
@@ -7,6 +8,7 @@ import { useMeetingList } from '../../hooks/useMeetingList';
 import { useOrganization } from '../../hooks/useOrganization';
 import { useAuth } from '../../hooks/useAuth';
 import { MEETING_STATUS } from '@chirpy/shared';
+import { ROUTES } from '../../constants/routes.constants';
 import styles from './DashboardPage.module.scss';
 
 export function DashboardPage() {
@@ -82,18 +84,23 @@ export function DashboardPage() {
         ) : (
           <div className={styles.meetingList}>
             {meetingData?.meetings.map((meeting) => (
-              <div key={meeting.id} className={styles.meetingRow}>
+              <Link
+                key={meeting.id}
+                to={ROUTES.MEETINGS.DETAIL(meeting.id)}
+                className={styles.meetingRow}
+              >
                 <div>
                   <Typography variant="label">{meeting.title}</Typography>
                   <Typography variant="caption" color="secondary">
-                    {meeting.platform.replace('_', ' ')} ·{' '}
-                    {meeting.status}
+                    {meeting.platform.replace('_', ' ')} · {meeting.status}
                   </Typography>
                 </div>
                 <Typography variant="bodySmall" color="secondary">
                   {meeting.participantCount} participants
+                  {meeting.averageParticipationScore > 0 &&
+                    ` · ${meeting.averageParticipationScore}% avg`}
                 </Typography>
-              </div>
+              </Link>
             ))}
           </div>
         )}

@@ -15,6 +15,14 @@ export interface MeetingPlatformAdapter {
     callback: (participantName: string, speaking: boolean) => void,
   ): () => void;
 
+  onHandRaise(
+    callback: (participantName: string, timestamp: number) => void,
+  ): () => void;
+
+  onMicActivity(
+    callback: (participantName: string, speaking: boolean) => void,
+  ): () => void;
+
   onMeetingEnd(callback: () => void): () => void;
 
   destroy(): void;

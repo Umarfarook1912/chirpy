@@ -25,8 +25,8 @@ export const RECORDING_ERRORS = {
   UNKNOWN: 'An unknown recording error occurred.',
 } as const;
 
-export function getRecordingFileName(meetingTitle: string): string {
+export function getRecordingFileName(meetingTitle: string, extension = 'webm'): string {
   const sanitized = meetingTitle.replace(/[^a-z0-9]/gi, '-').toLowerCase();
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  return `chirpy-recording-${sanitized}-${timestamp}.webm`;
+  return `chirpy-recording-${sanitized}-${timestamp}.${extension}`;
 }

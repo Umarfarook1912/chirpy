@@ -29,7 +29,6 @@ export class AuthService {
     const org = await orgRepo.create({
       name: input.organizationName,
       slug,
-      ownerId: null as unknown as Types.ObjectId,
     });
 
     const user = await userRepo.create({
@@ -40,7 +39,7 @@ export class AuthService {
       organizationId: org._id as Types.ObjectId,
     });
 
-    await orgRepo.update(String(org._id), { ownerId: user._id } as never);
+    await orgRepo.update(String(org._id), { ownerId: user._id as Types.ObjectId });
 
     const { accessToken, refreshToken } = await this.generateTokenPair(user);
 
@@ -122,14 +121,17 @@ export class AuthService {
     return { accessToken, refreshToken };
   }
 
-  private toProfile(user: { _id: unknown; email: string; displayName: string; avatarUrl?: string; role: string }, orgName: string): UserProfile {
+  private toProfile(
+    user: { _id: unknown; email: string; displayName: string; avatarUrl?: string; role: string; organizationId?: unknown },
+    orgName: string,
+  ): UserProfile {
     return {
       id: String(user._id),
       email: user.email,
       displayName: user.displayName,
       avatarUrl: user.avatarUrl,
       role: user.role as UserProfile['role'],
-      organizationId: '',
+      organizationId: user.organizationId ? String(user.organizationId) : '',
       organizationName: orgName,
     };
   }

@@ -5,6 +5,7 @@ import { resolve } from 'path';
 import manifest from './src/manifest.json';
 
 export default defineConfig({
+  base: './',
   plugins: [
     react(),
     crx({ manifest }),
@@ -21,6 +22,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         popup: resolve(__dirname, 'src/popup/popup.html'),
+        offscreen: resolve(__dirname, 'src/offscreen/offscreen.html'),
       },
     },
   },

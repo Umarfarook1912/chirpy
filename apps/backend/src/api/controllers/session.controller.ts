@@ -1,17 +1,24 @@
 import type { Request, Response, NextFunction } from 'express';
-import { SessionRepository } from '../../repositories/SessionRepository';
-import { MeetingRepository } from '../../repositories/MeetingRepository';
+import { appendFileSync } from 'fs';
+import { join } from 'path';
+import { SessionRepository } from '../../repositories/SessionRepository';import { MeetingRepository } from '../../repositories/MeetingRepository';
 import { ParticipationScoringService } from '../../services/ParticipationScoringService';
 import { sendSuccess } from '../../utils/response.utils';
-import { ConflictError } from '../../errors/ConflictError';
-import { NotFoundError } from '../../errors/NotFoundError';
-import { AuthorizationError } from '../../errors/AuthorizationError';
 import type { SessionSyncInput } from '@chirpy/shared';
 import type { Types } from 'mongoose';
 
 const sessionRepo = new SessionRepository();
 const meetingRepo = new MeetingRepository();
 const scoringService = new ParticipationScoringService();
+
+const DEBUG_LOG_PATH = join(process.cwd(), '.cursor', 'debug-fb5d5f.log');
+function writeBackendDebugLog(data: Record<string, unknown>): void {
+  try {
+    appendFileSync(DEBUG_LOG_PATH, `${JSON.stringify({ sessionId: 'fb5d5f', ...data, timestamp: Date.now() })}\n`);
+  } catch {
+    /* ignore */
+  }
+}
 
 export const sessionController = {
   async sync(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -20,13 +27,25 @@ export const sessionController = {
 
       const existing = await sessionRepo.findByIdempotencyKey(payload.idempotencyKey);
       if (existing) {
-        sendSuccess(res, { message: 'Session already synced', sessionId: String(existing._id) });
+        const meetingId = String(existing.meetingId);
+        writeBackendDebugLog({
+          hypothesisId: 'H-sync',
+          location: 'session.controller:sync',
+          message: 'duplicate session',
+          data: { meetingId },
+        });
+        sendSuccess(res, {
+          message: 'Session already synced',
+          sessionId: String(existing._id),
+          meetingId,
+        });
         return;
       }
 
-      let meeting = (await meetingRepo.findByOrganization(req.user!.organizationId, {
-        limit: 1,
-      })).meetings.find((m) => m.externalMeetingId === payload.externalMeetingId);
+      let meeting = await meetingRepo.findByExternalId(
+        req.user!.organizationId,
+        payload.externalMeetingId,
+      );
 
       if (!meeting) {
         const created = await meetingRepo.create({
@@ -37,16 +56,7 @@ export const sessionController = {
           hostId: req.user!.userId as unknown as Types.ObjectId,
           scheduledAt: new Date(payload.startedAt),
         });
-        meeting = {
-          _id: created._id,
-          organizationId: created.organizationId,
-          title: created.title,
-          platform: created.platform,
-          status: created.status,
-          startedAt: created.startedAt,
-          endedAt: created.endedAt,
-          externalMeetingId: created.externalMeetingId,
-        } as never;
+        meeting = created;
       }
 
       const sessionScore = scoringService.scoreSession(payload);
@@ -56,7 +66,7 @@ export const sessionController = {
 
       const { session } = await sessionRepo.createWithInteractions(
         {
-          meetingId: (meeting as { _id: Types.ObjectId })._id,
+          meetingId: meeting._id,
           organizationId: req.user!.organizationId as unknown as Types.ObjectId,
           startedAt,
           endedAt,
@@ -64,7 +74,7 @@ export const sessionController = {
           idempotencyKey: payload.idempotencyKey,
         },
         sessionScore.participants.map((p) => ({
-          meetingId: (meeting as { _id: Types.ObjectId })._id,
+          meetingId: meeting._id,
           organizationId: req.user!.organizationId as unknown as Types.ObjectId,
           displayName: p.displayName,
           attendanceDurationSeconds: p.attendanceDurationSeconds,
@@ -76,8 +86,25 @@ export const sessionController = {
         })),
       );
 
-      sendSuccess(res, { sessionId: String(session._id), score: sessionScore.averageScore }, 201);
-    } catch (err) {
+      await meetingRepo.update(String(meeting._id), {
+        title: payload.meetingTitle,
+        status: 'completed',
+        startedAt,
+        endedAt,
+      });
+
+      writeBackendDebugLog({
+        hypothesisId: 'H-sync',
+        location: 'session.controller:sync',
+        message: 'session created',
+        data: { meetingId: String(meeting._id) },
+      });
+
+      sendSuccess(res, {
+        sessionId: String(session._id),
+        meetingId: String(meeting._id),
+        score: sessionScore.averageScore,
+      }, 201);    } catch (err) {
       next(err);
     }
   },

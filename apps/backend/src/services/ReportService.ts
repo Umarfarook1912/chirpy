@@ -22,9 +22,59 @@ export class ReportService {
       meeting.startedAt && meeting.endedAt
         ? meeting.endedAt.getTime() - meeting.startedAt.getTime()
         : 0;
+    const meetingDurationSeconds = Math.max(1, Math.round(durationMs / 1_000));
 
-    const totalScore = interactions.reduce((sum, i) => sum + i.participationScore, 0);
-    const averageScore = interactions.length > 0 ? Math.round(totalScore / interactions.length) : 0;
+    const merged = new Map<
+      string,
+      {
+        displayName: string;
+        attendanceDurationSeconds: number;
+        chatMessageCount: number;
+        handRaiseCount: number;
+        reactionCount: number;
+        speakingDurationSeconds: number;
+        participationScore: number;
+      }
+    >();
+
+    for (const i of interactions) {
+      const name = i.displayName.trim();
+      if (!name || /^Meet\b/i.test(name)) continue;
+      if (/^\d+$/.test(name.trim())) continue;
+      if (name.trim().length < 2) continue;
+
+      const key = name.toLowerCase();
+      const cappedAttendance = Math.min(i.attendanceDurationSeconds, meetingDurationSeconds);
+      const existing = merged.get(key);
+
+      if (existing) {
+        existing.chatMessageCount += i.chatMessageCount;
+        existing.handRaiseCount += i.handRaiseCount;
+        existing.reactionCount += i.reactionCount;
+        existing.speakingDurationSeconds += i.speakingDurationSeconds;
+        existing.attendanceDurationSeconds = Math.max(
+          existing.attendanceDurationSeconds,
+          cappedAttendance,
+        );
+        existing.participationScore = Math.round(
+          (existing.participationScore + i.participationScore) / 2,
+        );
+      } else {
+        merged.set(key, {
+          displayName: name,
+          attendanceDurationSeconds: cappedAttendance,
+          chatMessageCount: i.chatMessageCount,
+          handRaiseCount: i.handRaiseCount,
+          reactionCount: i.reactionCount,
+          speakingDurationSeconds: i.speakingDurationSeconds,
+          participationScore: i.participationScore,
+        });
+      }
+    }
+
+    const participants = Array.from(merged.values());
+    const totalScore = participants.reduce((sum, p) => sum + p.participationScore, 0);
+    const averageScore = participants.length > 0 ? Math.round(totalScore / participants.length) : 0;
 
     return {
       meetingId: String(meeting._id),
@@ -32,20 +82,20 @@ export class ReportService {
       startedAt: meeting.startedAt?.toISOString() ?? '',
       endedAt: meeting.endedAt?.toISOString(),
       durationMinutes: Math.round(durationMs / 60_000),
-      totalParticipants: interactions.length,
+      totalParticipants: participants.length,
       averageParticipationScore: averageScore,
-      highEngagementCount: interactions.filter((i) => getEngagementLevel(i.participationScore) === 'high').length,
-      mediumEngagementCount: interactions.filter((i) => getEngagementLevel(i.participationScore) === 'medium').length,
-      lowEngagementCount: interactions.filter((i) => getEngagementLevel(i.participationScore) === 'low').length,
-      participants: interactions.map((i) => ({
-        participantId: String(i._id),
-        displayName: i.displayName,
-        attendanceDurationSeconds: i.attendanceDurationSeconds,
-        chatMessageCount: i.chatMessageCount,
-        handRaiseCount: i.handRaiseCount,
-        reactionCount: i.reactionCount,
-        speakingDurationSeconds: i.speakingDurationSeconds,
-        participationScore: i.participationScore,
+      highEngagementCount: participants.filter((p) => getEngagementLevel(p.participationScore) === 'high').length,
+      mediumEngagementCount: participants.filter((p) => getEngagementLevel(p.participationScore) === 'medium').length,
+      lowEngagementCount: participants.filter((p) => getEngagementLevel(p.participationScore) === 'low').length,
+      participants: participants.map((p) => ({
+        participantId: p.displayName,
+        displayName: p.displayName,
+        attendanceDurationSeconds: p.attendanceDurationSeconds,
+        chatMessageCount: p.chatMessageCount,
+        handRaiseCount: p.handRaiseCount,
+        reactionCount: p.reactionCount,
+        speakingDurationSeconds: p.speakingDurationSeconds,
+        participationScore: p.participationScore,
       })),
     };
   }

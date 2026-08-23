@@ -1,4 +1,11 @@
-import type { MeetingPlatform } from '@chirpy/shared';
+import type { MeetingPlatform, RecordingStatus } from '@chirpy/shared';
+
+export interface ActiveRecordingState {
+  tabId: number;
+  status: RecordingStatus;
+  elapsedSeconds: number;
+  errorMessage?: string;
+}
 
 export interface MeetingInfo {
   externalMeetingId: string;
@@ -42,4 +49,17 @@ export type ExtensionMessageType =
   | 'SPEAKING_STOPPED'
   | 'SYNC_SESSION'
   | 'RECORDING_START'
-  | 'RECORDING_STOP';
+  | 'RECORDING_STOP'
+  | 'RECORDING_GET_STATE'
+  | 'RECORDING_STATE_CHANGED'
+  | 'PREPARE_RECORDING'
+  | 'RECORDING_UI_UPDATE'
+  | 'END_MEETING_SESSION'
+  | 'OPEN_MEETING_TAB'
+  | 'FINISH_MEETING_SESSION'
+  | 'DOWNLOAD_RECORDING'
+  | 'GET_RECORDING_FOR_WEB'
+  | 'STORE_INTERACTION'
+  | 'DEBUG_LOG'
+  | 'OFFSCREEN_RECORDING_START'
+  | 'OFFSCREEN_RECORDING_STOP';

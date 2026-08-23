@@ -4,6 +4,7 @@ import type { UserProfile } from '@chirpy/shared';
 export interface AuthContextValue {
   user: UserProfile | null;
   isLoading: boolean;
+  isInitializing: boolean;
   login: (email: string, password: string) => Promise<void>;
   register: (data: { email: string; password: string; displayName: string; organizationName: string }) => Promise<void>;
   logout: () => Promise<void>;

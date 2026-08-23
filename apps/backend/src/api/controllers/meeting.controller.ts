@@ -23,6 +23,16 @@ export const meetingController = {
     }
   },
 
+  async lookup(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const externalMeetingId = req.query['externalMeetingId'] as string;
+      const meetingId = await meetingService.lookupByExternalId(req.user!, externalMeetingId);
+      sendSuccess(res, { meetingId });
+    } catch (err) {
+      next(err);
+    }
+  },
+
   async create(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const meeting = await meetingService.createMeeting(req.user!, req.body);

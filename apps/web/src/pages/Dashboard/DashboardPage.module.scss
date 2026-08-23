@@ -45,8 +45,11 @@
   border-radius: var(--radius-md);
   gap: var(--space-4);
   transition: box-shadow var(--transition-fast);
+  text-decoration: none;
+  color: inherit;
 
   &:hover {
     box-shadow: var(--shadow-sm);
+    text-decoration: none;
   }
 }

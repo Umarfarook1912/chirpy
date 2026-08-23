@@ -8,6 +8,7 @@ const router: ExpressRouter = Router();
 
 router.use(authenticate);
 
+router.get('/lookup', meetingController.lookup);
 router.get('/', validate(MeetingQuerySchema, 'query'), meetingController.list);
 router.get('/:id', meetingController.get);
 router.post('/', validate(CreateMeetingSchema), meetingController.create);

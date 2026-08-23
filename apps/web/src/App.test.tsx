@@ -36,6 +36,7 @@ const mockAuth: AuthContextValue = {
     organizationName: 'Test Org',
   },
   isLoading: false,
+  isInitializing: false,
   login: async () => undefined,
   register: async () => undefined,
   logout: async () => undefined,

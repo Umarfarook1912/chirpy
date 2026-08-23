@@ -1,6 +1,8 @@
 import { MeetingRepository } from '../repositories/MeetingRepository';
 import { NotFoundError } from '../errors/NotFoundError';
 import { AuthorizationError } from '../errors/AuthorizationError';
+import { SessionModel } from '../models/Session.model';
+import { InteractionModel } from '../models/Interaction.model';
 import type {
   CreateMeetingInput,
   UpdateMeetingInput,
@@ -20,9 +22,10 @@ export class MeetingService {
     query: MeetingQueryInput,
   ): Promise<{ meetings: MeetingSummary[]; total: number; page: number; limit: number }> {
     const { meetings, total } = await meetingRepo.findByOrganization(user.organizationId, query);
+    const statsByMeetingId = await this.getMeetingStatsMap(meetings.map((m) => String(m._id)));
 
     return {
-      meetings: meetings.map((m) => this.toSummary(m)),
+      meetings: meetings.map((m) => this.toSummary(m, statsByMeetingId.get(String(m._id)))),
       total,
       page: query.page ?? 1,
       limit: query.limit ?? 20,
@@ -34,6 +37,13 @@ export class MeetingService {
     if (!meeting) throw new NotFoundError('Meeting');
     if (String(meeting.organizationId) !== user.organizationId) throw new AuthorizationError();
     return this.toMeeting(meeting);
+  }
+
+  async lookupByExternalId(user: AuthTokenPayload, externalMeetingId: string): Promise<string> {
+    if (!externalMeetingId?.trim()) throw new NotFoundError('Meeting');
+    const meeting = await meetingRepo.findByExternalId(user.organizationId, externalMeetingId);
+    if (!meeting) throw new NotFoundError('Meeting');
+    return String(meeting._id);
   }
 
   async createMeeting(user: AuthTokenPayload, input: CreateMeetingInput): Promise<Meeting> {
@@ -81,7 +91,55 @@ export class MeetingService {
     };
   }
 
-  private toSummary(doc: MeetingDocument): MeetingSummary {
+  private async getMeetingStatsMap(
+    meetingIds: string[],
+  ): Promise<Map<string, { participantCount: number; averageParticipationScore: number }>> {
+    const stats = new Map<string, { participantCount: number; averageParticipationScore: number }>();
+    if (meetingIds.length === 0) return stats;
+
+    const sessions = await SessionModel.find({ meetingId: { $in: meetingIds } })
+      .select('_id meetingId')
+      .exec();
+    const sessionIds = sessions.map((s) => s._id);
+    const sessionToMeeting = new Map(
+      sessions.map((s) => [String(s._id), String(s.meetingId)]),
+    );
+
+    const interactions = await InteractionModel.find({ sessionId: { $in: sessionIds } })
+      .select('sessionId participationScore')
+      .exec();
+
+    for (const interaction of interactions) {
+      const meetingId = sessionToMeeting.get(String(interaction.sessionId));
+      if (!meetingId) continue;
+
+      const current = stats.get(meetingId) ?? {
+        participantCount: 0,
+        averageParticipationScore: 0,
+        totalScore: 0,
+      };
+      current.participantCount += 1;
+      (current as { totalScore: number }).totalScore += interaction.participationScore;
+      stats.set(meetingId, current);
+    }
+
+    const result = new Map<string, { participantCount: number; averageParticipationScore: number }>();
+    for (const [meetingId, value] of stats) {
+      const totalScore = (value as { totalScore?: number }).totalScore ?? 0;
+      result.set(meetingId, {
+        participantCount: value.participantCount,
+        averageParticipationScore:
+          value.participantCount > 0 ? Math.round(totalScore / value.participantCount) : 0,
+      });
+    }
+
+    return result;
+  }
+
+  private toSummary(
+    doc: MeetingDocument,
+    stats?: { participantCount: number; averageParticipationScore: number },
+  ): MeetingSummary {
     const durationMs =
       doc.startedAt && doc.endedAt
         ? doc.endedAt.getTime() - doc.startedAt.getTime()
@@ -96,8 +154,8 @@ export class MeetingService {
       startedAt: doc.startedAt?.toISOString(),
       endedAt: doc.endedAt?.toISOString(),
       durationMinutes: durationMs !== undefined ? Math.round(durationMs / 60_000) : undefined,
-      participantCount: 0,
-      averageParticipationScore: 0,
+      participantCount: stats?.participantCount ?? 0,
+      averageParticipationScore: stats?.averageParticipationScore ?? 0,
     };
   }
 }

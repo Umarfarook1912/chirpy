@@ -32,6 +32,14 @@ export function formatElapsedSeconds(seconds: number): string {
   return parts.join(':');
 }
 
+export function formatSeconds(seconds: number | undefined): string {
+  if (seconds === undefined || seconds <= 0) return '—';
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
+
 export function getRelativeTime(isoString: string): string {
   const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
   const diffMs = new Date(isoString).getTime() - Date.now();

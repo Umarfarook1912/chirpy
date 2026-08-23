@@ -32,7 +32,6 @@ const SessionSchema = new Schema<SessionDocument>(
   { timestamps: true },
 );
 
-SessionSchema.index({ idempotencyKey: 1 }, { unique: true });
 SessionSchema.index({ meetingId: 1 });
 SessionSchema.index({ organizationId: 1, createdAt: -1 });
 

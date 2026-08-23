@@ -37,7 +37,7 @@ export const authController = {
       const refreshToken = (req.cookies?.refreshToken as string | undefined) ?? req.body.refreshToken as string;
       const { accessToken, refreshToken: newRefreshToken } = await authService.refreshTokens(refreshToken);
       setTokenCookies(res, accessToken, newRefreshToken);
-      sendSuccess(res, { message: 'Tokens refreshed' });
+      sendSuccess(res, { message: 'Tokens refreshed', accessToken });
     } catch (err) {
       next(err);
     }

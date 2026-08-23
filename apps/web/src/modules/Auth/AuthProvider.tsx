@@ -1,57 +1,74 @@
-import { useState, useCallback, type ReactNode } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useCallback, useState, type ReactNode } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { authApi } from '../../api/auth.api';
 import { AuthContext } from '../../hooks/useAuth';
-import type { UserProfile } from '@chirpy/shared';
+import { Spinner } from '../../ui/atoms/Spinner';
 
 export interface AuthProviderProps {
   children: ReactNode;
-  initialUser: UserProfile | null;
 }
 
-export function AuthProvider({ children, initialUser }: AuthProviderProps) {
-  const [user, setUser] = useState<UserProfile | null>(initialUser);
-  const [isLoading, setIsLoading] = useState(false);
+export function AuthProvider({ children }: AuthProviderProps) {
   const queryClient = useQueryClient();
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const login = useCallback(async (email: string, password: string) => {
-    setIsLoading(true);
-    try {
-      const { profile } = await authApi.login({ email, password });
-      setUser(profile);
-      await queryClient.invalidateQueries();
-    } finally {
-      setIsLoading(false);
-    }
-  }, [queryClient]);
+  const { data: user = null, isPending: isInitializing } = useQuery({
+    queryKey: ['auth', 'me'],
+    queryFn: () => authApi.me(),
+    retry: false,
+    staleTime: 5 * 60 * 1_000,
+    refetchOnWindowFocus: false,
+  });
+
+  const login = useCallback(
+    async (email: string, password: string) => {
+      setIsSubmitting(true);
+      try {
+        const { profile } = await authApi.login({ email, password });
+        queryClient.setQueryData(['auth', 'me'], profile);
+        await queryClient.invalidateQueries();
+      } finally {
+        setIsSubmitting(false);
+      }
+    },
+    [queryClient],
+  );
 
   const register = useCallback(
     async (data: { email: string; password: string; displayName: string; organizationName: string }) => {
-      setIsLoading(true);
+      setIsSubmitting(true);
       try {
         const { profile } = await authApi.register(data);
-        setUser(profile);
+        queryClient.setQueryData(['auth', 'me'], profile);
         await queryClient.invalidateQueries();
       } finally {
-        setIsLoading(false);
+        setIsSubmitting(false);
       }
     },
     [queryClient],
   );
 
   const logout = useCallback(async () => {
-    setIsLoading(true);
+    setIsSubmitting(true);
     try {
       await authApi.logout();
-      setUser(null);
+      queryClient.setQueryData(['auth', 'me'], null);
       queryClient.clear();
     } finally {
-      setIsLoading(false);
+      setIsSubmitting(false);
     }
   }, [queryClient]);
 
+  if (isInitializing) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh' }}>
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
   return (
-    <AuthContext.Provider value={{ user, isLoading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, isLoading: isSubmitting, isInitializing, login, register, logout }}>
       {children}
     </AuthContext.Provider>
   );

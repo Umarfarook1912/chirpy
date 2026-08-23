@@ -13,8 +13,11 @@ export class SyncQueueRepository {
     await db.syncQueue.update(id, { status: 'syncing', lastAttemptAt: Date.now() });
   }
 
-  async markSynced(id: number): Promise<void> {
-    await db.syncQueue.update(id, { status: 'synced' });
+  async markSynced(id: number, meetingId?: string): Promise<void> {
+    await db.syncQueue.update(id, {
+      status: 'synced',
+      ...(meetingId ? { meetingId } : {}),
+    });
   }
 
   async markFailed(id: number, error: string, retryCount: number): Promise<void> {

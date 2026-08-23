@@ -6,6 +6,7 @@ import { LoginPage } from './pages/Auth/LoginPage';
 import { RegisterPage } from './pages/Auth/RegisterPage';
 import { DashboardPage } from './pages/Dashboard/DashboardPage';
 import { MeetingListPage } from './pages/Meeting/MeetingListPage';
+import { MeetingDetailPage } from './pages/Meeting/MeetingDetailPage';
 import { OrganizationPage } from './pages/Organization/OrganizationPage';
 import { ReportsPage } from './pages/Reports/ReportsPage';
 import { SettingsPage } from './pages/Settings/SettingsPage';
@@ -55,7 +56,7 @@ export default function App() {
       <Route element={<ProtectedLayout />}>
         <Route path={ROUTES.DASHBOARD} element={<DashboardPage />} />
         <Route path={ROUTES.MEETINGS.LIST} element={<MeetingListPage />} />
-        <Route path={ROUTES.MEETINGS.DETAIL_PATTERN} element={<MeetingListPage />} />
+        <Route path={ROUTES.MEETINGS.DETAIL_PATTERN} element={<MeetingDetailPage />} />
         <Route path={ROUTES.ORGANIZATION} element={<OrganizationPage />} />
         <Route path={ROUTES.REPORTS} element={<ReportsPage />} />
         <Route path={ROUTES.SETTINGS} element={<SettingsPage />} />

@@ -7,11 +7,16 @@
     "storage",
     "activeTab",
     "scripting",
-    "cookies"
+    "cookies",
+    "alarms",
+    "tabs",
+    "offscreen",
+    "downloads"
   ],
   "host_permissions": [
     "https://meet.google.com/*",
-    "http://localhost:3001/*"
+    "http://localhost:3001/*",
+    "http://localhost:5173/*"
   ],
   "background": {
     "service_worker": "src/background/background.ts",
@@ -21,6 +26,11 @@
     {
       "matches": ["https://meet.google.com/*"],
       "js": ["src/content/content.ts"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["http://localhost:5173/*"],
+      "js": ["src/content/webBridge.ts"],
       "run_at": "document_idle"
     }
   ],

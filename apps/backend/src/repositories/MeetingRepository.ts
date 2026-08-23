@@ -47,6 +47,13 @@ export class MeetingRepository {
     return MeetingModel.create(data);
   }
 
+  async findByExternalId(
+    organizationId: string,
+    externalMeetingId: string,
+  ): Promise<MeetingDocument | null> {
+    return MeetingModel.findOne({ organizationId, externalMeetingId }).exec();
+  }
+
   async update(
     id: string,
     data: Partial<MeetingDocument>,

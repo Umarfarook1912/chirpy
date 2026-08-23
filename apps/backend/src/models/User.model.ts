@@ -30,7 +30,6 @@ const UserSchema = new Schema<UserDocument>(
   { timestamps: true },
 );
 
-UserSchema.index({ email: 1 }, { unique: true });
 UserSchema.index({ organizationId: 1 });
 
 export const UserModel = model<UserDocument>('User', UserSchema);

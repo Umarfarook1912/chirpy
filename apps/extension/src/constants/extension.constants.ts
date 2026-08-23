@@ -1,6 +1,6 @@
 export const EXTENSION_CONSTANTS = {
   DB_NAME: 'chirpy-extension',
-  DB_VERSION: 1,
+  DB_VERSION: 3,
 
   SYNC_RETRY_LIMIT: 3,
   SYNC_RETRY_DELAY_MS: 5_000,
@@ -10,10 +10,11 @@ export const EXTENSION_CONSTANTS = {
   SPEAKING_MIN_DURATION_MS: 500,
 
   GOOGLE_MEET_HOST: 'meet.google.com',
-  GOOGLE_MEET_URL_PATTERN: /^https:\/\/meet\.google\.com\/([a-z]{3}-[a-z]{4}-[a-z]{3})/,
+  GOOGLE_MEET_URL_PATTERN: /^https:\/\/meet\.google\.com\/(?:lookup\/)?([a-z]{3}-[a-z]{4}-[a-z]{3})(?:[/?#]|$)/i,
 
   STORAGE_KEY_AUTH: 'chirpy_auth',
   STORAGE_KEY_CURRENT_SESSION: 'chirpy_current_session',
 
+  WEB_APP_URL: 'http://localhost:5173',
   API_BASE_URL: 'http://localhost:3001/api',
 } as const;

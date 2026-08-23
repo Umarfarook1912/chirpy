@@ -7,14 +7,10 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
-    "outDir": "./dist",
-    "baseUrl": ".",
-    "types": ["vite/client"],
-    "paths": {
-      "@chirpy/shared": ["../../packages/shared/src/index.ts"],
-      "@/*": ["./src/*"]
-    }
+    "noEmit": true,
+    "rootDir": "./src",
+    "types": ["vite/client"]
   },
-  "include": ["src", "../../packages/shared/src"],
+  "include": ["src"],
   "exclude": ["node_modules", "dist"]
 }

@@ -1,43 +1,72 @@
-import { useState, useCallback } from 'react';
-import { RecordingService } from '../recording/RecordingService';
+import { useState, useCallback, useEffect } from 'react';
 import { formatElapsedSeconds } from '../utils/format.utils';
 import type { RecordingStatus } from '@chirpy/shared';
 import { RECORDING_STATUS } from '@chirpy/shared';
+import type { ActiveRecordingState } from '../types/extension.types';
 import styles from './RecordingControls.module.css';
 
 export function RecordingControls() {
   const [status, setStatus] = useState<RecordingStatus>(RECORDING_STATUS.IDLE);
   const [elapsed, setElapsed] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [activeTabId, setActiveTabId] = useState<number | null>(null);
 
-  const [service] = useState(
-    () =>
-      new RecordingService(
-        (newStatus, error) => {
-          setStatus(newStatus);
-          if (error) setErrorMessage(error);
-          if (newStatus === RECORDING_STATUS.IDLE) {
-            setElapsed(0);
-            setErrorMessage(null);
-          }
-        },
-        (seconds) => setElapsed(seconds),
-        'meeting',
-      ),
-  );
+  const refreshState = useCallback(async () => {
+    const response = await chrome.runtime.sendMessage({ type: 'RECORDING_GET_STATE' });
+    const state = response?.state as ActiveRecordingState | null | undefined;
+    if (state) {
+      setStatus(state.status);
+      setElapsed(state.elapsedSeconds);
+      setErrorMessage(state.errorMessage ?? null);
+      setActiveTabId(state.tabId);
+    } else {
+      setStatus(RECORDING_STATUS.IDLE);
+      setElapsed(0);
+      setErrorMessage(null);
+      setActiveTabId(null);
+    }
+  }, []);
 
-  const handleStart = useCallback(() => {
+  useEffect(() => {
+    void refreshState();
+    const intervalId = window.setInterval(() => {
+      void refreshState();
+    }, 1_000);
+    return () => window.clearInterval(intervalId);
+  }, [refreshState]);
+
+  const handleStart = useCallback(async () => {
     setErrorMessage(null);
-    void service.start();
-  }, [service]);
 
-  const handleStop = useCallback(() => {
-    void service.stop();
-  }, [service]);
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id || !tab.url?.includes('meet.google.com')) {
+      setErrorMessage('Open a Google Meet call in this tab before recording.');
+      return;
+    }
 
-  const handleReset = useCallback(() => {
-    service.reset();
-  }, [service]);
+    const response = await chrome.runtime.sendMessage({
+      type: 'RECORDING_START',
+      payload: { tabId: tab.id },
+    });
+
+    if (!response?.success) {
+      setErrorMessage(response?.error ?? 'Failed to start recording');
+      return;
+    }
+
+    window.close();
+  }, []);
+
+  const handleStop = useCallback(async () => {
+    await chrome.runtime.sendMessage({
+      type: 'RECORDING_STOP',
+      payload: { syncSession: true },
+    });
+    await refreshState();
+  }, [refreshState]);
+
+  const isRecording =
+    status === RECORDING_STATUS.RECORDING || status === RECORDING_STATUS.REQUESTING;
 
   return (
     <div className={styles.container}>
@@ -55,29 +84,43 @@ export function RecordingControls() {
         </p>
       )}
 
+      {isRecording && (
+        <p className={styles.hint}>
+          Recording runs on the Meet page. Use the Stop button overlay or below to finish and sync.
+        </p>
+      )}
+
       <div className={styles.actions}>
         {status === RECORDING_STATUS.IDLE && (
-          <button className={styles.startButton} onClick={handleStart} type="button">
+          <button className={styles.startButton} onClick={() => void handleStart()} type="button">
             Start Recording
           </button>
         )}
-        {status === RECORDING_STATUS.RECORDING && (
-          <button className={styles.stopButton} onClick={handleStop} type="button">
+        {isRecording && (
+          <button className={styles.stopButton} onClick={() => void handleStop()} type="button">
             Stop Recording
           </button>
         )}
-        {(status === RECORDING_STATUS.REQUESTING || status === RECORDING_STATUS.STOPPING) && (
+        {(status === RECORDING_STATUS.STOPPING) && (
           <button className={styles.disabledButton} disabled type="button">
             <span className={styles.spinner} />
-            {status === RECORDING_STATUS.REQUESTING ? 'Waiting for permission...' : 'Stopping...'}
+            Stopping...
           </button>
         )}
         {(status === RECORDING_STATUS.COMPLETED || status === RECORDING_STATUS.ERROR) && (
-          <button className={styles.resetButton} onClick={handleReset} type="button">
-            {status === RECORDING_STATUS.COMPLETED ? 'New Recording' : 'Try Again'}
+          <button
+            className={styles.resetButton}
+            onClick={() => void refreshState()}
+            type="button"
+          >
+            {status === RECORDING_STATUS.COMPLETED ? 'Done' : 'Try Again'}
           </button>
         )}
       </div>
+
+      {activeTabId !== null && isRecording && (
+        <p className={styles.hint}>Popup can be closed — recording continues on Meet.</p>
+      )}
     </div>
   );
 }
@@ -98,8 +141,8 @@ function StatusDot({ status }: { status: RecordingStatus }) {
 function getStatusLabel(status: RecordingStatus): string {
   const labels: Record<RecordingStatus, string> = {
     idle: 'Ready to record',
-    requesting: 'Requesting permission',
-    recording: 'Recording',
+    requesting: 'Waiting for screen share…',
+    recording: 'Recording on Meet',
     stopping: 'Stopping',
     completed: 'Recording saved',
     error: 'Recording failed',

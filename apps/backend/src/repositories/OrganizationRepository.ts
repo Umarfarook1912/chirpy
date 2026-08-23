@@ -13,14 +13,14 @@ export class OrganizationRepository {
   async create(data: {
     name: string;
     slug: string;
-    ownerId: Types.ObjectId;
+    ownerId?: Types.ObjectId;
   }): Promise<OrganizationDocument> {
     return OrganizationModel.create(data);
   }
 
   async update(
     id: string,
-    data: Partial<{ name: string; logoUrl: string }>,
+    data: Partial<{ name: string; logoUrl: string; ownerId: Types.ObjectId }>,
   ): Promise<OrganizationDocument | null> {
     return OrganizationModel.findByIdAndUpdate(id, data, { new: true }).exec();
   }
