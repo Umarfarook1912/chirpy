@@ -23,6 +23,7 @@ export default defineConfig({
       input: {
         popup: resolve(__dirname, 'src/popup/popup.html'),
         offscreen: resolve(__dirname, 'src/offscreen/offscreen.html'),
+        download: resolve(__dirname, 'src/download/download.html'),
       },
     },
   },

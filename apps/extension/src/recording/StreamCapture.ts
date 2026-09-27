@@ -1,5 +1,4 @@
 import { RECORDING_ERRORS } from '@chirpy/shared';
-import { writeDebugLog } from '../utils/debugLog';
 
 let activeAudioContext: AudioContext | null = null;
 
@@ -20,17 +19,6 @@ export async function captureDisplayMedia(): Promise<MediaStream> {
 
     const videoTracks = displayStream.getVideoTracks();
     const displayAudioTracks = displayStream.getAudioTracks();
-
-    writeDebugLog(
-      'StreamCapture:captureDisplayMedia',
-      'display stream captured',
-      {
-        videoTracks: videoTracks.length,
-        audioTracks: displayAudioTracks.length,
-        videoLabel: videoTracks[0]?.label ?? 'none',
-      },
-      'H-recording',
-    );
 
     let micStream: MediaStream | null = null;
     try {
@@ -72,16 +60,6 @@ export async function captureDisplayMedia(): Promise<MediaStream> {
     });
 
     const finalStream = new MediaStream(combinedTracks);
-    writeDebugLog(
-      'StreamCapture:captureDisplayMedia',
-      'combined stream ready',
-      {
-        totalTracks: combinedTracks.length,
-        hasVideo: finalStream.getVideoTracks().length > 0,
-        hasAudio: finalStream.getAudioTracks().length > 0,
-      },
-      'H-recording',
-    );
 
     return finalStream;
   } catch (err) {

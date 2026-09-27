@@ -1,7 +1,6 @@
 import { RecordingService } from '../recording/RecordingService';
 import type { RecordingStopResult } from '../recording/RecordingService';
 import { RecordingRepository } from '../db/RecordingRepository';
-import { writeDebugLog } from '../utils/debugLog';
 import type { RecordingStatus } from '@chirpy/shared';
 
 const recordingRepo = new RecordingRepository();
@@ -44,12 +43,6 @@ async function persistRecording(result: RecordingStopResult): Promise<string> {
     createdAt: Date.now(),
   });
   lastSavedRecordingKey = result.recordingKey;
-  writeDebugLog(
-    'offscreen.ts:persistRecording',
-    'recording saved',
-    { recordingKey: result.recordingKey, blobSize: result.blob.size },
-    'H-recording',
-  );
   return result.recordingKey;
 }
 
@@ -61,7 +54,6 @@ async function stopAndPersist(): Promise<RecordingStopResult | null> {
     .then(async (result) => {
       service = null;
       if (!result) {
-        writeDebugLog('offscreen.ts:stopAndPersist', 'stop returned null', {}, 'H-recording');
         return null;
       }
       await persistRecording(result);
@@ -99,12 +91,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.type === 'OFFSCREEN_RECORDING_STOP') {
     void (async () => {
       if (lastSavedRecordingKey) {
-        writeDebugLog(
-          'offscreen.ts:OFFSCREEN_RECORDING_STOP',
-          'returning cached key',
-          { recordingKey: lastSavedRecordingKey },
-          'H-recording',
-        );
         sendResponse({ success: true, recordingKey: lastSavedRecordingKey });
         return;
       }

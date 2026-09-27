@@ -20,8 +20,9 @@ export default defineConfig({
   server: {
     port: 5173,
     headers: {
+      // credentialless allows loading FFmpeg wasm from CDN under isolation
       'Cross-Origin-Opener-Policy': 'same-origin',
-      'Cross-Origin-Embedder-Policy': 'require-corp',
+      'Cross-Origin-Embedder-Policy': 'credentialless',
     },
     proxy: {
       '/api': {

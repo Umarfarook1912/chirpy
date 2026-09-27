@@ -2,7 +2,12 @@ import type { MeetingPlatformAdapter } from './MeetingPlatformAdapter';
 import type { MeetingInfo, DetectedParticipant, ChatEvent, SpeakingEvent } from '../../types/extension.types';
 import { EXTENSION_CONSTANTS } from '../../constants/extension.constants';
 import { isValidParticipantName } from '../../utils/blob.utils';
-import { debugLog } from '../../utils/debugLog';
+import {
+  collectParticipantsFromSignals,
+  parseMeetParticipantLabel,
+  parseRaisedHandList,
+  preferRealName,
+} from '../../utils/participantDetect.utils';
 
 // ─── Chat helpers ────────────────────────────────────────────────────────────
 
@@ -121,9 +126,62 @@ function findChatInput(): HTMLElement | null {
   );
 }
 
-function getSelfDisplayName(): string {
-  const self = document.querySelector('[data-self-name][data-is-self], [data-self-name]');
-  return self?.getAttribute('data-self-name')?.trim() ?? 'You';
+let observedSelfName: string | null = null;
+
+/** Resolve the local user's real display name (never prefer a peer tile). */
+export function getSelfDisplayName(): string {
+  const selfTile =
+    document.querySelector('[data-is-self]') ??
+    document.querySelector('[data-self-name][data-is-self]');
+
+  const fromTile = selfTile ? getNameFromTile(selfTile) : null;
+  const fromOverlay = selfTile ? extractOverlayName(selfTile) : null;
+
+  let fromAria: string | null = null;
+  for (const el of document.querySelectorAll('[aria-label*="(you)" i]')) {
+    const parsed = parseMeetParticipantLabel(el.getAttribute('aria-label') ?? '');
+    if (parsed && !/^you$/i.test(parsed.displayName)) {
+      fromAria = parsed.displayName;
+      break;
+    }
+  }
+
+  const attr = document
+    .querySelector('[data-self-name][data-is-self], [data-self-name]')
+    ?.getAttribute('data-self-name')
+    ?.trim();
+
+  const fromYouText = readSelfNameFromYouText();
+
+  return preferRealName(fromAria, fromOverlay, fromTile, attr, fromYouText, observedSelfName) ?? 'You';
+}
+
+/** People-panel text is "Umar Farook J(You)Meeting host" even when aria is only the name. */
+function readSelfNameFromYouText(): string | null {
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  let steps = 0;
+  while (node && steps < 300) {
+    steps += 1;
+    if (!/\(you\)/i.test(node.textContent ?? '')) {
+      node = walker.nextNode();
+      continue;
+    }
+    let el: Element | null = node.parentElement;
+    for (let depth = 0; el && depth < 4; depth += 1) {
+      const text = (el.textContent ?? '').replace(/\s+/g, ' ').trim();
+      if (text.length > 120) break;
+      const match = /^([A-Za-z][^()]{1,40}?)\s*\(you\)/i.exec(text);
+      const name = match?.[1]?.trim();
+      if (name && isValidParticipantName(name)) {
+        observedSelfName = name;
+        return name;
+      }
+      el = el.parentElement;
+    }
+    node = walker.nextNode();
+  }
+  return null;
 }
 
 function readInputText(input: HTMLElement): string {
@@ -136,28 +194,95 @@ function readInputText(input: HTMLElement): string {
 // ─── Participant name extraction from tile ───────────────────────────────────
 
 /**
- * Given a participant tile element (or any element inside it), extract the display name.
- * Google Meet uses several patterns across versions.
+ * Extract name from a tile's data-tooltip or LEAF text content only.
+ *
+ * IMPORTANT: We must NOT call el.textContent on elements that have child elements —
+ * that concatenates all child text and produces doubled names like
+ * "Umar Farook JUmar Farook J" or "JmuJrru" (avatar initial + name).
  */
-function getNameFromTile(tile: Element): string | null {
-  // data-self-name attribute
-  const selfName = tile.getAttribute('data-self-name');
-  if (selfName?.trim()) return selfName.trim();
-
-  // aria-label="Name (you)" or "Name (host)"
-  const ariaLabel = tile.getAttribute('aria-label');
-  if (ariaLabel) {
-    const stripped = ariaLabel.replace(/\s*\(you\)\s*$/i, '').replace(/\s*\(host\)\s*$/i, '').trim();
-    if (stripped && stripped.length <= 80) return stripped;
+function extractOverlayName(tile: Element): string | null {
+  // 1. data-tooltip anywhere in the tile — always a single clean string
+  for (const el of tile.querySelectorAll('[data-tooltip]')) {
+    const tooltip = el.getAttribute('data-tooltip')?.trim();
+    const name = preferRealName(tooltip);
+    if (name && !/^you$/i.test(name)) return name;
   }
 
-  // Name label inside the tile – various class names used across Meet versions
-  const nameEl = tile.querySelector(
-    '[data-self-name], .KF4T6b, .ZjFb7c, [class*="participantName"], [class*="name-label"]',
-  );
-  const name = nameEl?.textContent?.trim();
-  if (name && name.length <= 80) return name;
+  // 2. Known name-badge class names — only use LEAF elements (no child elements)
+  //    so we never concatenate nested text nodes.
+  const badgeSelectors = [
+    '.KF4T6b', '.ZjFb7c', '.zWGUib', '.XEazBc',
+    '[class*="participantName"]', '[class*="name-label"]', '[class*="ParticipantName"]',
+  ];
+  for (const sel of badgeSelectors) {
+    for (const el of tile.querySelectorAll(sel)) {
+      // Skip non-leaf elements — textContent on parents combines all child text
+      if (el.children.length > 0) continue;
+      const text = el.textContent?.trim();
+      const name = preferRealName(text);
+      if (name && !/^you$/i.test(name)) return name;
+    }
+  }
 
+  return null;
+}
+
+/**
+ * Given a participant tile element, extract the display name using safe sources only.
+ * Priority: tile aria-label → data-self-name attribute → leaf overlay text.
+ * NEVER use textContent on composite elements — that produces doubled strings.
+ */
+function getNameFromTile(tile: Element): string | null {
+  // Tile-level aria-label is the most reliable: Meet sets it to "Name (you)" / "Name, muted"
+  const ariaLabel = tile.getAttribute('aria-label');
+  const fromAria = ariaLabel ? parseMeetParticipantLabel(ariaLabel)?.displayName : null;
+  if (fromAria && !/^you$/i.test(fromAria)) return fromAria;
+
+  // data-self-name attribute — set by Meet directly, single string
+  const attr = tile.getAttribute('data-self-name')?.trim();
+  if (attr && !/^you$/i.test(attr) && isValidParticipantName(attr)) return attr;
+
+  // Overlay leaf text as last resort
+  const overlay = extractOverlayName(tile);
+  if (overlay) return overlay;
+
+  // Accept "You" only from aria-label (so we can resolve it later)
+  if (fromAria === 'You') return 'You';
+  if (attr && /^you$/i.test(attr)) return 'You';
+
+  return null;
+}
+
+function doubledSpeakingName(raw: string): string | null {
+  let text = raw.replace(/\s+/g, ' ').trim();
+  const cut = text.search(/frame_person|reframe|visual_effects|backgrounds/i);
+  if (cut === 0) return null;
+  if (cut > 0) text = text.slice(0, cut).trim();
+  text = text.replace(/^(front_hand|back_hand)\s*/i, '');
+  text = text.replace(/\s*(devices|more_vert|more actions).*$/i, '').trim();
+  if (text.length < 4 || text.length % 2 !== 0) return null;
+  const half = text.length / 2;
+  if (text.slice(0, half) !== text.slice(half)) return null;
+  const name = text.slice(0, half).trim();
+  if (!isValidParticipantName(name) || /^you$/i.test(name)) return null;
+  return name;
+}
+
+/**
+ * The active-speaker class sits on a tile whose text is the name twice,
+ * plus a suffix: "JrruJrrudevices" or "front_handJrruJrrudevices".
+ * That text is on the participant tile, not always on the highlight element.
+ * The toolbar tile ("frame_personReframe...") is not a person.
+ */
+function nameFromSpeakingTile(marker: Element): string | null {
+  const tile = marker.closest('[data-participant-id]');
+  const candidates = [tile?.textContent ?? '', marker.textContent ?? '', marker.parentElement?.textContent ?? ''];
+  for (const candidate of candidates) {
+    const compact = candidate.replace(/\s+/g, ' ').trim();
+    if (compact.length < 4 || compact.length > 160) continue;
+    const name = doubledSpeakingName(compact);
+    if (name) return name;
+  }
   return null;
 }
 
@@ -173,54 +298,110 @@ function getNameFromTile(tile: Element): string | null {
  */
 function detectSpeakerFromTile(tile: Element): string | null {
   const label = tile.getAttribute('aria-label') ?? '';
-  const speakingMatch = /^(.+?)\s+is speaking/i.exec(label);
-  if (speakingMatch?.[1]) return speakingMatch[1].trim();
-
-  if (tile.getAttribute('data-is-speaking') === 'true') {
-    return getNameFromTile(tile);
+  const speakingMatch =
+    /^(.+?)\s+is speaking/i.exec(label) ??
+    /^(.+?)\s+\(.*\)\s+is speaking/i.exec(label);
+  if (speakingMatch?.[1]) {
+    const name = speakingMatch[1].replace(/\s*\(you\)\s*$/i, '').trim();
+    return isValidParticipantName(name) ? name : null;
   }
 
+  if (tile.getAttribute('data-is-speaking') === 'true') {
+    const name = getNameFromTile(tile);
+    return name && isValidParticipantName(name) ? name : null;
+  }
+
+  // Active border / waveform indicators used across Meet versions
   const hasSpeakingIndicator =
     tile.querySelector(
-      '.YEI2ub, .KV1GEc, .kssMZb, [class*="speaking-indicator"], [class*="speakingIndicator"], [class*="audioLevel"], [class*="speaking"]',
+      [
+        '.YEI2ub',
+        '.KV1GEc',
+        '.kssMZb',
+        '[class*="speaking-indicator"]',
+        '[class*="speakingIndicator"]',
+        '[class*="audioLevel"]',
+        '[jsname="Qg9Jr"]',
+        'div[style*="box-shadow"][style*="rgb"]',
+      ].join(', '),
     ) !== null;
-  if (hasSpeakingIndicator) {
-    return getNameFromTile(tile);
+
+  // Some builds put speaking state on the tile class itself
+  const tileLooksActive = /\bspeaking\b/i.test(tile.className);
+
+  if (hasSpeakingIndicator || tileLooksActive) {
+    const name = getNameFromTile(tile);
+    return name && isValidParticipantName(name) ? name : null;
   }
 
   return null;
 }
 
+/** Scan whole document for Meet "is speaking" aria labels (covers non-tile layouts). */
+function detectSpeakersFromDocument(): string[] {
+  const names: string[] = [];
+  for (const el of document.querySelectorAll('[aria-label*="is speaking" i]')) {
+    const label = el.getAttribute('aria-label') ?? '';
+    const match = /^(.+?)\s+is speaking/i.exec(label);
+    if (!match?.[1]) continue;
+    const name = match[1].replace(/\s*\(you\)\s*$/i, '').trim();
+    if (isValidParticipantName(name) && !names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
+/**
+ * Only look at DOM elements that are semantically "participant tiles".
+ * NEVER scan all [aria-label] elements — that picks up UI controls as names.
+ */
 function collectParticipantNames(): DetectedParticipant[] {
   const seen = new Set<string>();
   const results: DetectedParticipant[] = [];
 
-  const addName = (name: string | null, isSelf: boolean, tile?: Element) => {
-    if (!name || !isValidParticipantName(name) || seen.has(name)) return;
-    seen.add(name);
-    results.push({
-      displayName: name,
-      isSelf,
-      isSpeaking: tile ? detectSpeakerFromTile(tile) !== null : false,
-    });
+  const add = (name: string | null, isSelf: boolean) => {
+    if (!name) return;
+    const clean = name.trim();
+    if (!isValidParticipantName(clean) && !/^you$/i.test(clean)) return;
+    if (seen.has(clean.toLowerCase())) return;
+    seen.add(clean.toLowerCase());
+    results.push({ displayName: clean, isSelf, isSpeaking: false });
   };
 
-  for (const tile of document.querySelectorAll('[data-participant-id], [data-self-name]')) {
-    addName(getNameFromTile(tile), tile.hasAttribute('data-is-self'), tile);
+  // ── Strategy 1: Video / audio tiles that Meet renders for each person ──
+  // These data-attributes are only placed on participant containers, not UI controls.
+  const tileSel = [
+    '[data-participant-id]',
+    '[data-self-name]',
+    '[data-is-self]',
+    '[data-requested-participant-id]',
+    '[data-allocation-index]',
+  ].join(', ');
+
+  for (const tile of document.querySelectorAll(tileSel)) {
+    const isSelf = tile.hasAttribute('data-is-self');
+    const name = getNameFromTile(tile);
+    add(name, isSelf);
   }
 
-  for (const item of document.querySelectorAll(
-    '[aria-label*="People" i] [role="listitem"], [data-panel-id="people"] [role="listitem"], [aria-label*="Participants" i] [role="listitem"]',
-  )) {
-    const label = item.getAttribute('aria-label');
-    if (!label) continue;
-    const name = label
-      .replace(/\s*\(you\)\s*$/i, '')
-      .replace(/\s*\(host\)\s*$/i, '')
-      .split(',')[0]
-      ?.trim();
-    addName(name || null, /\(you\)/i.test(label), item);
+  // ── Strategy 2: People / participants panel list items (only when panel open) ──
+  // Meet puts one [role="listitem"] per person with an aria-label like "Name, muted".
+  const peoplePanelItem = [
+    '[data-panel-id="people"] [role="listitem"]',
+    '[aria-label="Participants"] [role="listitem"]',
+    '[aria-label^="People"] [role="listitem"]',
+    '[jsname][role="list"] [role="listitem"]',
+  ].join(', ');
+
+  for (const item of document.querySelectorAll(peoplePanelItem)) {
+    const label = item.getAttribute('aria-label') ?? '';
+    if (!label || /^more information/i.test(label)) continue;
+    const parsed = parseMeetParticipantLabel(label);
+    if (parsed) add(parsed.displayName, parsed.isSelf);
   }
+
+  // ── Strategy 3: Always include the known self name ──
+  const selfName = getSelfDisplayName();
+  add(selfName, true);
 
   return results;
 }
@@ -244,6 +425,17 @@ export class GoogleMeetAdapter implements MeetingPlatformAdapter {
   }
 
   /**
+   * Snapshot of who is currently visible in Meet (for flush-before-sync).
+   */
+  getVisibleParticipants(): DetectedParticipant[] {
+    try {
+      return collectParticipantNames();
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Emits participants present at each change.
    * Callers should diff against a previous set to detect joins/leaves.
    */
@@ -263,7 +455,7 @@ export class GoogleMeetAdapter implements MeetingPlatformAdapter {
     this.observers.push(observer);
     callback(getParticipants());
 
-    const pollId = window.setInterval(() => callback(getParticipants()), 3_000);
+    const pollId = window.setInterval(() => callback(getParticipants()), 1_000);
     this.cleanupFns.push(() => window.clearInterval(pollId));
     return () => observer.disconnect();
   }
@@ -285,33 +477,46 @@ export class GoogleMeetAdapter implements MeetingPlatformAdapter {
       const name = getNameFromTile(tile);
       if (!name) return;
 
-      if (speaker) {
-        if (!currentSpeakers.has(name)) {
-          currentSpeakers.add(name);
-          debugLog('GoogleMeetAdapter:speaking', 'speaking start', { name }, 'H-speaking');
-          callback(name, true);
-        }
-      } else {
-        if (currentSpeakers.has(name)) {
-          currentSpeakers.delete(name);
-          debugLog('GoogleMeetAdapter:speaking', 'speaking stop', { name }, 'H-speaking');
-          callback(name, false);
-        }
-      }
+      if (!speaker || currentSpeakers.has(name)) return;
+      currentSpeakers.add(name);
+      callback(name, true);
     };
 
     const scanAllTiles = () => {
+      const activeFromDoc = new Set(detectSpeakersFromDocument());
+
       for (const tile of document.querySelectorAll('[data-participant-id], [data-self-name]')) {
         evalTile(tile);
+        const speaker = detectSpeakerFromTile(tile);
+        if (speaker) activeFromDoc.add(speaker);
       }
-      // Clear stale speakers that are no longer in the DOM
+
+      const selfName = getSelfDisplayName();
+      for (const marker of document.querySelectorAll('.atLQQ.kssMZb')) {
+        const name = nameFromSpeakingTile(marker);
+        if (!name || !isValidParticipantName(name)) continue;
+        if (/^you$/i.test(name)) continue;
+        if (selfName && name.toLowerCase() === selfName.toLowerCase()) continue;
+        activeFromDoc.add(name);
+      }
+
+      for (const name of activeFromDoc) {
+        if (!currentSpeakers.has(name) && isValidParticipantName(name)) {
+          currentSpeakers.add(name);
+          callback(name, true);
+        }
+      }
+
       for (const name of Array.from(currentSpeakers)) {
-        const stillPresent = Array.from(
-          document.querySelectorAll('[data-participant-id], [data-self-name]'),
-        ).some((t) => getNameFromTile(t) === name);
-        if (!stillPresent) {
-          currentSpeakers.delete(name);
-          callback(name, false);
+        if (!activeFromDoc.has(name)) {
+          // Keep if tile still reports speaking
+          const stillOnTile = Array.from(
+            document.querySelectorAll('[data-participant-id], [data-self-name]'),
+          ).some((t) => detectSpeakerFromTile(t) === name);
+          if (!stillOnTile) {
+            currentSpeakers.delete(name);
+            callback(name, false);
+          }
         }
       }
     };
@@ -368,35 +573,77 @@ export class GoogleMeetAdapter implements MeetingPlatformAdapter {
 
   /**
    * Tracks when the local user's microphone is unmuted as speaking time.
-   * Meet does not expose other participants' audio levels reliably via DOM.
+   * Google Meet DOM varies by locale/version — use several selectors.
    */
   onMicActivity(callback: (participantName: string, speaking: boolean) => void): () => void {
     let speaking = false;
 
+    const isMicUnmuted = (): boolean => {
+      // Unmuted: button that will "Turn off / Mute" the mic
+      const unmuteControl = document.querySelector(
+        [
+          'button[aria-label*="Turn off microphone" i]',
+          'button[aria-label*="Mute microphone" i]',
+          'button[aria-label="Mute" i]',
+          'button[data-is-muted="false"][aria-label*="microphone" i]',
+          'button[data-is-muted="false"][aria-label*="mic" i]',
+          'div[role="button"][aria-label*="Turn off microphone" i]',
+        ].join(', '),
+      );
+      if (unmuteControl) return true;
+
+      // Muted: explicit "Turn on / Unmute" — treat as not speaking
+      const muteControl = document.querySelector(
+        [
+          'button[aria-label*="Turn on microphone" i]',
+          'button[aria-label*="Unmute microphone" i]',
+          'button[aria-label="Unmute" i]',
+          'button[data-is-muted="true"][aria-label*="microphone" i]',
+        ].join(', '),
+      );
+      if (muteControl) return false;
+
+      const selfTile = document.querySelector('[data-is-self], [data-self-name][data-is-self]');
+      if (selfTile?.getAttribute('data-is-muted') === 'false') return true;
+      if (selfTile?.getAttribute('data-is-muted') === 'true') return false;
+
+      return false;
+    };
+
     const checkMic = () => {
       const name = getSelfDisplayName();
-      const micOffBtn = document.querySelector(
-        'button[aria-label*="Turn off microphone" i], button[aria-label*="Mute microphone" i][data-is-muted="false"]',
-      );
-      const selfTile = document.querySelector('[data-is-self], [data-self-name][data-is-self]');
-      const selfUnmuted = selfTile?.getAttribute('data-is-muted') === 'false';
-      const active = Boolean(micOffBtn) || selfUnmuted;
+      const active = isMicUnmuted();
 
       if (active && !speaking) {
         speaking = true;
-        debugLog('GoogleMeetAdapter:micActivity', 'mic unmuted — speaking start', { name }, 'H-speaking');
         callback(name, true);
       } else if (!active && speaking) {
         speaking = false;
-        debugLog('GoogleMeetAdapter:micActivity', 'mic muted — speaking stop', { name }, 'H-speaking');
         callback(name, false);
       }
     };
 
+    const onMicClick = (event: Event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (!target.closest('button[aria-label*="microphone" i], button[aria-label*="mic" i], button[aria-label="Mute" i], button[aria-label="Unmute" i]')) {
+        return;
+      }
+      window.setTimeout(checkMic, 200);
+      window.setTimeout(checkMic, 600);
+    };
+    document.addEventListener('click', onMicClick, true);
+
     const pollId = window.setInterval(checkMic, 500);
     checkMic();
-    this.cleanupFns.push(() => window.clearInterval(pollId));
-    return () => window.clearInterval(pollId);
+    this.cleanupFns.push(() => {
+      window.clearInterval(pollId);
+      document.removeEventListener('click', onMicClick, true);
+    });
+    return () => {
+      window.clearInterval(pollId);
+      document.removeEventListener('click', onMicClick, true);
+    };
   }
 
   /**
@@ -409,14 +656,65 @@ export class GoogleMeetAdapter implements MeetingPlatformAdapter {
    *  – A dedicated hand-raise badge element on participant tiles
    */
   onHandRaise(callback: (participantName: string, timestamp: number) => void): () => void {
-    const processedRaises = new Set<string>();
+    const raisedNow = new Set<string>();
+    const lastSignalAt = new Map<string, number>();
+    let lastSeenPanel = 0;
 
-    const emitRaise = (name: string) => {
-      const bucket = `${name}-${Math.floor(Date.now() / 5_000)}`;
-      if (processedRaises.has(bucket)) return;
-      processedRaises.add(bucket);
-      debugLog('GoogleMeetAdapter:handRaise', 'hand raise', { name }, 'H-interaction');
-      callback(name, Date.now());
+    const noteRaised = (
+      people: Array<{ displayName: string; isSelf: boolean }>,
+      fullList: boolean,
+    ) => {
+      const present = new Set<string>();
+      const now = Date.now();
+      if (people.length > 0) lastSeenPanel = now;
+      for (const person of people) {
+        const key = person.displayName.toLowerCase();
+        present.add(key);
+        if (person.isSelf) observedSelfName = person.displayName;
+        const previous = lastSignalAt.get(key) ?? 0;
+        // A new render burst several seconds later is another raise. The icon
+        // often stays in the DOM between a remote user's lower and the next raise.
+        const newBurst = previous > 0 && now - previous > 2_000;
+        lastSignalAt.set(key, now);
+        if (raisedNow.has(key) && !newBurst) continue;
+        raisedNow.add(key);
+        callback(person.displayName, now);
+      }
+      if (fullList) {
+        for (const key of [...raisedNow]) {
+          if (!present.has(key)) raisedNow.delete(key);
+        }
+      }
+    };
+
+    const readRaisedPeople = (): Map<string, { displayName: string; isSelf: boolean }> => {
+      const found = new Map<string, { displayName: string; isSelf: boolean }>();
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+      let node: Node | null;
+      let scanned = 0;
+      while ((node = walker.nextNode()) && scanned < 4000) {
+        if (!(node instanceof Element)) continue;
+        scanned += 1;
+        const text = node.textContent ?? '';
+        if (text.length < 12 || text.length > 400) continue;
+        if (!text.includes('front_hand') || !/Lower all|Hand raises/i.test(text)) continue;
+        for (const person of parseRaisedHandList(text)) {
+          found.set(person.displayName.toLowerCase(), person);
+        }
+      }
+      return found;
+    };
+
+    const syncRaisedHands = () => {
+      const found = readRaisedPeople();
+      if (found.size > 0) {
+        lastSeenPanel = Date.now();
+        return;
+      }
+      if (lastSeenPanel !== 0 && Date.now() - lastSeenPanel > 1_000) {
+        raisedNow.clear();
+        lastSeenPanel = 0;
+      }
     };
 
     const onRaiseClick = (event: Event) => {
@@ -428,18 +726,17 @@ export class GoogleMeetAdapter implements MeetingPlatformAdapter {
       if (!btn) return;
       const label = btn.getAttribute('aria-label') ?? btn.getAttribute('data-tooltip') ?? '';
       if (/lower hand/i.test(label)) return;
-      emitRaise(getSelfDisplayName());
+      syncRaisedHands();
     };
     document.addEventListener('click', onRaiseClick, true);
 
     const checkElement = (el: Element) => {
       const label = el.getAttribute('aria-label') ?? el.textContent ?? '';
-      if (!/raised.?hand|has raised|raise hand/i.test(label)) return;
+      if (!/raised.?hand|has raised|front_hand/i.test(label)) return;
 
-      const tile = el.closest('[data-participant-id], [data-self-name], [role="listitem"]');
-      const name = tile ? getNameFromTile(tile) : null;
-      const nameMatch = /^(.+?)\s+(raised|has raised)/i.exec(label)?.[1]?.trim();
-      emitRaise(name ?? nameMatch ?? getSelfDisplayName());
+      const people = parseRaisedHandList(label);
+      const fullList = /Lower all/i.test(label) && /front_hand/i.test(label);
+      if (people.length > 0) noteRaised(people, fullList);
     };
 
     const raiseObserver = new MutationObserver((mutations) => {
@@ -459,9 +756,13 @@ export class GoogleMeetAdapter implements MeetingPlatformAdapter {
     raiseObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label'] });
     this.observers.push(raiseObserver);
 
+    const pollId = window.setInterval(syncRaisedHands, 400);
+    this.cleanupFns.push(() => window.clearInterval(pollId));
+
     return () => {
       document.removeEventListener('click', onRaiseClick, true);
       raiseObserver.disconnect();
+      window.clearInterval(pollId);
     };
   }
 
@@ -484,14 +785,12 @@ export class GoogleMeetAdapter implements MeetingPlatformAdapter {
       const input = findChatInput();
       if (!input || boundInputs.has(input)) return Boolean(input);
       boundInputs.add(input);
-      debugLog('GoogleMeetAdapter:bindChatInput', 'chat input bound', { ariaLabel: input.getAttribute('aria-label') }, 'H-chat');
 
       input.addEventListener('keydown', (event) => {
         if (event.key !== 'Enter' || event.shiftKey) return;
         const message = readInputText(input);
         const senderName = getSelfDisplayName();
         if (message && isValidChat(senderName, message)) {
-          debugLog('GoogleMeetAdapter:bindChatInput', 'chat sent via enter', { senderName, message: message.slice(0, 40) }, 'H-chat');
           emitMessage({ senderName, message, timestamp: Date.now() });
         }
       }, true);
@@ -528,7 +827,6 @@ export class GoogleMeetAdapter implements MeetingPlatformAdapter {
 
       attachedRoot = chatRoot;
       const scanRoot = chatRoot ?? document.body;
-      debugLog('GoogleMeetAdapter:attachToChatPanel', 'chat panel attached', { hasRoot: Boolean(chatRoot) }, 'H-chat');
 
       scanMessages(scanRoot);
       if (chatObserver) chatObserver.disconnect();

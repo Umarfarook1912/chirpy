@@ -2,24 +2,34 @@ import type { SessionSyncInput } from '@chirpy/shared';
 import { SyncQueueRepository } from '../db/SyncQueueRepository';
 import { EXTENSION_CONSTANTS } from '../constants/extension.constants';
 import { getSyncAuthHeaders } from './authHeaders';
-import { writeDebugLog } from '../utils/debugLog';
 
 const syncQueueRepo = new SyncQueueRepository();
 
-function meetingIdStorageKey(externalMeetingId: string): string {
-  return `chirpy:meetingId:${externalMeetingId}`;
+function meetingIdStorageKey(externalMeetingId: string, startedAt?: string | number): string {
+  if (startedAt !== undefined) {
+    return `chirpy:meetingId:${externalMeetingId}:${startedAt}`;
+  }
+  return `chirpy:meetingId:${externalMeetingId}:latest`;
 }
 
 export async function cacheMeetingId(
   externalMeetingId: string,
   meetingId: string,
+  startedAt?: string | number,
 ): Promise<void> {
-  await chrome.storage.local.set({ [meetingIdStorageKey(externalMeetingId)]: meetingId });
+  await chrome.storage.local.set({
+    [meetingIdStorageKey(externalMeetingId, startedAt)]: meetingId,
+    [meetingIdStorageKey(externalMeetingId)]: meetingId,
+  });
 }
 
-export async function getCachedMeetingId(externalMeetingId: string): Promise<string | undefined> {
-  const result = await chrome.storage.local.get(meetingIdStorageKey(externalMeetingId));
-  return result[meetingIdStorageKey(externalMeetingId)] as string | undefined;
+export async function getCachedMeetingId(
+  externalMeetingId: string,
+  startedAt?: string | number,
+): Promise<string | undefined> {
+  const key = meetingIdStorageKey(externalMeetingId, startedAt);
+  const result = await chrome.storage.local.get(key);
+  return result[key] as string | undefined;
 }
 
 export async function lookupMeetingIdByExternal(externalMeetingId: string): Promise<string | undefined> {
@@ -46,14 +56,6 @@ export async function lookupMeetingIdByExternal(externalMeetingId: string): Prom
 export async function syncSessionPayload(payload: SessionSyncInput): Promise<string | undefined> {
   try {
     const authHeaders = await getSyncAuthHeaders();
-    const hasAuth = Boolean(authHeaders.Authorization);
-
-    writeDebugLog(
-      'SyncService.ts:syncSessionPayload',
-      'sync start',
-      { hasAuth, externalMeetingId: payload.externalMeetingId },
-      'H-sync',
-    );
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 12_000);
@@ -89,20 +91,8 @@ export async function syncSessionPayload(payload: SessionSyncInput): Promise<str
 
     const meetingId = body.data?.meetingId;
 
-    writeDebugLog(
-      'SyncService.ts:syncSessionPayload',
-      'sync response',
-      {
-        status: response.status,
-        meetingId: meetingId ?? null,
-        ok: response.ok,
-        error: body.error?.message ?? null,
-      },
-      'H-sync',
-    );
-
     if (response.ok && meetingId) {
-      await cacheMeetingId(payload.externalMeetingId, meetingId);
+      await cacheMeetingId(payload.externalMeetingId, meetingId, payload.startedAt);
       const existing = await syncQueueRepo.getByIdempotencyKey(payload.idempotencyKey);
       if (existing?.id) {
         await syncQueueRepo.markSynced(existing.id, meetingId);
@@ -111,19 +101,13 @@ export async function syncSessionPayload(payload: SessionSyncInput): Promise<str
     }
 
     if (response.ok && !meetingId) {
-      const cached = await getCachedMeetingId(payload.externalMeetingId);
+      const cached = await getCachedMeetingId(payload.externalMeetingId, payload.startedAt);
       if (cached) return cached;
       return lookupMeetingIdByExternal(payload.externalMeetingId);
     }
 
     return lookupMeetingIdByExternal(payload.externalMeetingId);
-  } catch (err) {
-    writeDebugLog(
-      'SyncService.ts:syncSessionPayload',
-      'sync failed',
-      { error: err instanceof Error ? err.message : 'unknown' },
-      'H-sync',
-    );
+  } catch {
     return lookupMeetingIdByExternal(payload.externalMeetingId);
   }
 }

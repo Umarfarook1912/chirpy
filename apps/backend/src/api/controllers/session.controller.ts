@@ -1,7 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
-import { appendFileSync } from 'fs';
-import { join } from 'path';
-import { SessionRepository } from '../../repositories/SessionRepository';import { MeetingRepository } from '../../repositories/MeetingRepository';
+import { SessionRepository } from '../../repositories/SessionRepository';
+import { MeetingRepository } from '../../repositories/MeetingRepository';
 import { ParticipationScoringService } from '../../services/ParticipationScoringService';
 import { sendSuccess } from '../../utils/response.utils';
 import type { SessionSyncInput } from '@chirpy/shared';
@@ -11,15 +10,6 @@ const sessionRepo = new SessionRepository();
 const meetingRepo = new MeetingRepository();
 const scoringService = new ParticipationScoringService();
 
-const DEBUG_LOG_PATH = join(process.cwd(), '.cursor', 'debug-fb5d5f.log');
-function writeBackendDebugLog(data: Record<string, unknown>): void {
-  try {
-    appendFileSync(DEBUG_LOG_PATH, `${JSON.stringify({ sessionId: 'fb5d5f', ...data, timestamp: Date.now() })}\n`);
-  } catch {
-    /* ignore */
-  }
-}
-
 export const sessionController = {
   async sync(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
@@ -28,12 +18,6 @@ export const sessionController = {
       const existing = await sessionRepo.findByIdempotencyKey(payload.idempotencyKey);
       if (existing) {
         const meetingId = String(existing.meetingId);
-        writeBackendDebugLog({
-          hypothesisId: 'H-sync',
-          location: 'session.controller:sync',
-          message: 'duplicate session',
-          data: { meetingId },
-        });
         sendSuccess(res, {
           message: 'Session already synced',
           sessionId: String(existing._id),
@@ -42,7 +26,8 @@ export const sessionController = {
         return;
       }
 
-      let meeting = await meetingRepo.findByExternalId(
+      // Same Meet code can host multiple calls. Reuse only an open (non-completed) meeting.
+      let meeting = await meetingRepo.findOpenByExternalId(
         req.user!.organizationId,
         payload.externalMeetingId,
       );
@@ -93,18 +78,12 @@ export const sessionController = {
         endedAt,
       });
 
-      writeBackendDebugLog({
-        hypothesisId: 'H-sync',
-        location: 'session.controller:sync',
-        message: 'session created',
-        data: { meetingId: String(meeting._id) },
-      });
-
       sendSuccess(res, {
         sessionId: String(session._id),
         meetingId: String(meeting._id),
         score: sessionScore.averageScore,
-      }, 201);    } catch (err) {
+      }, 201);
+    } catch (err) {
       next(err);
     }
   },

@@ -1,7 +1,6 @@
 import type { RecordingStatus } from '@chirpy/shared';
 import { EXTENSION_CONSTANTS } from '../constants/extension.constants';
 import type { ActiveRecordingState } from '../types/extension.types';
-import { writeDebugLog } from '../utils/debugLog';
 
 const STORAGE_KEY = 'chirpy:activeRecording';
 
@@ -105,12 +104,6 @@ export async function stopRecording(options: {
   suppressUi?: boolean;
 }): Promise<{ recordingKey?: string } | void> {
   const state = await readState();
-  writeDebugLog(
-    'RecordingManager.ts:stopRecording',
-    'stop entry',
-    { hasState: Boolean(state), status: state?.status ?? null, elapsed: state?.elapsedSeconds ?? null },
-    'H-recording',
-  );
   if (!state) return;
 
   const tabId = state.tabId;
@@ -147,22 +140,8 @@ export async function stopRecording(options: {
     ])) as { success?: boolean; recordingKey?: string };
 
     recordingKey = offscreenResponse?.recordingKey;
-    writeDebugLog(
-      'RecordingManager.ts:stopRecording',
-      'offscreen stop response',
-      {
-        success: offscreenResponse?.success ?? false,
-        recordingKey: recordingKey ?? null,
-      },
-      'H-recording',
-    );
-  } catch (err) {
-    writeDebugLog(
-      'RecordingManager.ts:stopRecording',
-      'offscreen stop error',
-      { error: err instanceof Error ? err.message : 'unknown' },
-      'H-recording',
-    );
+  } catch {
+    /* offscreen document may already be closed */
   } finally {
     await closeOffscreenDocument();
     await writeState(null);

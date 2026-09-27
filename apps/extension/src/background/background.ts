@@ -1,7 +1,6 @@
 import { SyncService } from './SyncService';
 import type { ExtensionMessage, MeetingInfo } from '../types/extension.types';
 import { EXTENSION_CONSTANTS } from '../constants/extension.constants';
-import { debugLog, writeDebugLog } from '../utils/debugLog';
 import {
   getSessionsForTab,
   listActiveMeetingSessions,
@@ -12,7 +11,7 @@ import { isSessionFinished } from './SyncedSessionStore';
 import { lookupMeetingIdByExternal } from './SyncService';
 import { RecordingRepository } from '../db/RecordingRepository';
 import { InteractionRepository } from '../db/InteractionRepository';
-import { blobToDataUrl, blobToBase64Chunks, sanitizeDownloadFilename } from '../utils/blob.utils';
+import { blobToBase64Chunks, sanitizeDownloadFilename } from '../utils/blob.utils';
 import {
   getActiveRecording,
   handleRecordingStateChanged,
@@ -141,7 +140,11 @@ chrome.runtime.onMessage.addListener(
       }
 
       case 'MEETING_ENDED': {
-        const payload = message.payload as { sessionId: string; meeting?: MeetingInfo };
+        const payload = message.payload as {
+          sessionId: string;
+          meeting?: MeetingInfo;
+          selfDisplayName?: string;
+        };
         const tabId = sender.tab?.id;
         void (async () => {
           if (await isSessionFinished(payload.sessionId)) {
@@ -155,7 +158,11 @@ chrome.runtime.onMessage.addListener(
               tabId,
             });
           }
-          const meetingId = await enqueueAndSyncSession(payload.sessionId, payload.meeting);
+          const meetingId = await enqueueAndSyncSession(
+            payload.sessionId,
+            payload.meeting,
+            payload.selfDisplayName,
+          );
           sendResponse({ success: true, meetingId });
         })();
         return true;
@@ -236,12 +243,6 @@ chrome.runtime.onMessage.addListener(
         if (payload.recordingKey) {
           url.searchParams.set('recording', payload.recordingKey);
         }
-        writeDebugLog(
-          'background.ts:OPEN_MEETING_TAB',
-          'opening tab',
-          { meetingId: payload.meetingId, recordingKey: payload.recordingKey ?? null },
-          'H-nav',
-        );
         void chrome.tabs.create({ url: url.toString() });
         sendResponse({ success: true });
         return false;
@@ -252,6 +253,7 @@ chrome.runtime.onMessage.addListener(
           sessionId: string;
           meeting?: MeetingInfo;
           suppressUi?: boolean;
+          selfDisplayName?: string;
         };
         const tabId = sender.tab?.id;
 
@@ -294,12 +296,10 @@ chrome.runtime.onMessage.addListener(
 
             void (async () => {
               try {
-                const meetingId = await enqueueAndSyncSession(payload.sessionId, payload.meeting);
-                writeDebugLog(
-                  'background.ts:FINISH_MEETING_SESSION',
-                  'sync complete',
-                  { sessionId: payload.sessionId, meetingId: meetingId ?? null, recordingKey: recordingKey ?? null },
-                  'H-recording',
+                const meetingId = await enqueueAndSyncSession(
+                  payload.sessionId,
+                  payload.meeting,
+                  payload.selfDisplayName,
                 );
                 if (tabId && meetingId) {
                   void chrome.tabs.sendMessage(tabId, {
@@ -307,22 +307,11 @@ chrome.runtime.onMessage.addListener(
                     payload: { meetingId, recordingKey, sessionId: payload.sessionId },
                   });
                 }
-              } catch (syncErr) {
-                writeDebugLog(
-                  'background.ts:FINISH_MEETING_SESSION',
-                  'sync failed',
-                  { error: syncErr instanceof Error ? syncErr.message : 'unknown' },
-                  'H-sync',
-                );
+              } catch {
+                /* sync failure is retried from the queue */
               }
             })();
           } catch (err) {
-            writeDebugLog(
-              'background.ts:FINISH_MEETING_SESSION',
-              'finish failed',
-              { error: err instanceof Error ? err.message : 'unknown' },
-              'H-sync',
-            );
             sendResponse({
               success: false,
               error: err instanceof Error ? err.message : 'Failed to finish meeting',
@@ -341,26 +330,28 @@ chrome.runtime.onMessage.addListener(
               ? await repo.getByKey(payload.recordingKey)
               : await repo.getLatest();
             if (!recording) {
-              sendResponse({ success: false, error: 'Recording not found in local storage. Try reloading the extension.' });
+              sendResponse({
+                success: false,
+                error: 'Recording not found in local storage. Try reloading the extension.',
+              });
               return;
             }
             if (!recording.blob || recording.blob.size === 0) {
               sendResponse({ success: false, error: 'Recording blob is empty' });
               return;
             }
-            const dataUrl = await blobToDataUrl(recording.blob);
+
             const filename = sanitizeDownloadFilename(
               payload.meetingTitle ?? recording.meetingTitle ?? 'meeting',
               'webm',
             );
-            writeDebugLog(
-              'background.ts:DOWNLOAD_RECORDING',
-              'download prepared',
-              { recordingKey: recording.recordingKey, blobSize: recording.blob.size, mimeType: recording.mimeType },
-              'H-recording',
+            // Extension page has createObjectURL + IndexedDB access — avoids
+            // truncating huge payloads through sendMessage to the Meet tab.
+            const url = chrome.runtime.getURL(
+              `src/download/download.html?key=${encodeURIComponent(recording.recordingKey)}&filename=${encodeURIComponent(filename)}`,
             );
-            await chrome.downloads.download({ url: dataUrl, filename, saveAs: true });
-            sendResponse({ success: true, filename, downloaded: true });
+            await chrome.tabs.create({ url, active: false });
+            sendResponse({ success: true, downloaded: true, filename });
           } catch (err) {
             sendResponse({
               success: false,
@@ -422,21 +413,6 @@ chrome.runtime.onMessage.addListener(
           }
         })();
         return true;
-      }
-
-      case 'DEBUG_LOG': {
-        const logPayload = (message as { payload?: Record<string, unknown> }).payload;
-        if (logPayload) {
-          writeDebugLog(
-            String(logPayload.location ?? 'background'),
-            String(logPayload.message ?? ''),
-            (logPayload.data as Record<string, unknown>) ?? {},
-            String(logPayload.hypothesisId ?? ''),
-            String(logPayload.runId ?? 'post-fix'),
-          );
-        }
-        sendResponse({ success: true });
-        return false;
       }
 
       default:

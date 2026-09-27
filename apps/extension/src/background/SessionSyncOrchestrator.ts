@@ -5,7 +5,7 @@ import { generateIdempotencyKey } from '../utils/idempotency.utils';
 import { getMeetingSession, removeMeetingSession, saveMeetingSession } from './MeetingSessionStore';
 import { SyncService, getCachedMeetingId, syncSessionPayload, lookupMeetingIdByExternal } from './SyncService';
 import { isIdempotencySynced, markIdempotencySynced, markSessionFinished } from './SyncedSessionStore';
-import { writeDebugLog } from '../utils/debugLog';
+import { isValidParticipantName, normalizeSelfName } from '../utils/blob.utils';
 import type { MeetingInfo } from '../types/extension.types';
 
 const interactionRepo = new InteractionRepository();
@@ -15,6 +15,7 @@ const syncService = new SyncService();
 export async function enqueueAndSyncSession(
   sessionId: string,
   meetingFallback?: MeetingInfo,
+  selfDisplayName?: string,
 ): Promise<string | undefined> {
   let stored = await getMeetingSession(sessionId);
 
@@ -31,7 +32,12 @@ export async function enqueueAndSyncSession(
     Math.floor((endedAt - stored.meeting.startedAt) / 1_000),
   );
 
-  const aggregated = await interactionRepo.aggregateByParticipant(sessionId, durationSeconds);
+  const selfName =
+    selfDisplayName && isValidParticipantName(selfDisplayName) && !/^you$/i.test(selfDisplayName)
+      ? selfDisplayName.trim()
+      : undefined;
+
+  const aggregated = await interactionRepo.aggregateByParticipant(sessionId, endedAt);
   const rawEvents = await interactionRepo.getBySession(sessionId);
   const totalChatMessages = rawEvents.filter((e) => e.type === 'chat_message').length;
   const meetingTitle = stored.meeting.title;
@@ -40,20 +46,42 @@ export async function enqueueAndSyncSession(
   let interactions = mergeParticipants(
     aggregated
       .filter((p) => isRealParticipant(p.participantName, meetingTitle, externalId))
-      .map((p) => ({
-        displayName: p.participantName,
-        attendanceDurationSeconds: p.attendanceDurationSeconds || durationSeconds,
-        chatMessageCount: p.chatMessageCount,
-        handRaiseCount: p.handRaiseCount,
-        reactionCount: p.reactionCount,
-        speakingDurationSeconds: p.speakingDurationSeconds,
-      })),
+      .map((p) => {
+        const displayName = normalizeSelfName(p.participantName, selfName ?? null);
+        let speaking = p.speakingDurationSeconds;
+        let attendance = p.attendanceDurationSeconds;
+        // Speaking cannot exceed time present in the meeting
+        if (attendance > 0 && speaking > attendance) {
+          speaking = attendance;
+        }
+        return {
+          displayName,
+          attendanceDurationSeconds: attendance,
+          chatMessageCount: p.chatMessageCount,
+          handRaiseCount: p.handRaiseCount,
+          reactionCount: p.reactionCount,
+          speakingDurationSeconds: speaking,
+        };
+      }),
+    selfName,
   );
+
+  // Only fill missing attendance for the self user who was present the whole call
+  // without a join event. Never overwrite peers with full session duration.
+  for (const row of interactions) {
+    if (row.attendanceDurationSeconds <= 0) {
+      const isSelf =
+        selfName && row.displayName.toLowerCase() === selfName.toLowerCase();
+      if (isSelf || /^you$/i.test(row.displayName)) {
+        row.attendanceDurationSeconds = durationSeconds;
+      }
+    }
+  }
 
   if (interactions.length === 0) {
     interactions = [
       {
-        displayName: 'You',
+        displayName: selfName ?? 'You',
         attendanceDurationSeconds: durationSeconds,
         chatMessageCount: totalChatMessages,
         handRaiseCount: 0,
@@ -61,11 +89,6 @@ export async function enqueueAndSyncSession(
         speakingDurationSeconds: 0,
       },
     ];
-  } else if (totalChatMessages > 0) {
-    const syncedChat = interactions.reduce((sum, p) => sum + p.chatMessageCount, 0);
-    if (syncedChat < totalChatMessages && interactions.length === 1) {
-      interactions[0]!.chatMessageCount = totalChatMessages;
-    }
   }
 
   const idempotencyKey = generateIdempotencyKey(
@@ -73,7 +96,10 @@ export async function enqueueAndSyncSession(
     stored.meeting.startedAt,
   );
 
-  const cached = await getCachedMeetingId(stored.meeting.externalMeetingId);
+  const cached = await getCachedMeetingId(
+    stored.meeting.externalMeetingId,
+    stored.meeting.startedAt,
+  );
 
   if (await isIdempotencySynced(idempotencyKey)) {
     await removeMeetingSession(sessionId);
@@ -89,17 +115,6 @@ export async function enqueueAndSyncSession(
     endedAt: new Date(endedAt).toISOString(),
     interactions,
   };
-
-  writeDebugLog(
-    'SessionSyncOrchestrator.ts:enqueueAndSyncSession',
-    'sync payload',
-    {
-      participantCount: interactions.length,
-      chatTotal: interactions.reduce((sum, i) => sum + i.chatMessageCount, 0),
-      names: interactions.map((i) => i.displayName),
-    },
-    'H-chat',
-  );
 
   const meetingId = await syncSessionPayload(payload);
   if (meetingId) {
@@ -127,15 +142,10 @@ export async function enqueueAndSyncSession(
 }
 
 function isRealParticipant(name: string, meetingTitle: string, externalId: string): boolean {
+  if (!isValidParticipantName(name)) return false;
   const trimmed = name.trim();
-  if (!trimmed || trimmed === 'Unknown') return false;
-  if (/^\d+$/.test(trimmed)) return false;
-  if (trimmed.length < 2) return false;
   if (trimmed === meetingTitle) return false;
   if (trimmed.includes(externalId)) return false;
-  if (/^Meet\b/i.test(trimmed)) return false;
-  if (trimmed.split(/\s+/).length > 5) return false;
-  if (/^(mic|videocam|more_vert|keyboard_arrow|people|person|group)/i.test(trimmed)) return false;
   return true;
 }
 
@@ -148,38 +158,51 @@ type ParticipantPayload = {
   speakingDurationSeconds: number;
 };
 
-function mergeParticipants(participants: ParticipantPayload[]): ParticipantPayload[] {
+/**
+ * Merge duplicate name keys. "You" is ONLY folded into the known self display name —
+ * never into another peer (that previously stole host chat/speaking into Jrru).
+ */
+export function mergeParticipants(
+  participants: ParticipantPayload[],
+  selfDisplayName?: string,
+): ParticipantPayload[] {
   const merged = new Map<string, ParticipantPayload>();
 
+  const fold = (into: ParticipantPayload, from: ParticipantPayload) => {
+    into.chatMessageCount += from.chatMessageCount;
+    into.handRaiseCount += from.handRaiseCount;
+    into.reactionCount += from.reactionCount;
+    into.speakingDurationSeconds += from.speakingDurationSeconds;
+    into.attendanceDurationSeconds = Math.max(
+      into.attendanceDurationSeconds,
+      from.attendanceDurationSeconds,
+    );
+  };
+
   for (const p of participants) {
-    const key = p.displayName.toLowerCase();
+    const displayName = normalizeSelfName(p.displayName, selfDisplayName ?? null);
+    const key = displayName.toLowerCase();
     const existing = merged.get(key);
     if (existing) {
-      existing.chatMessageCount += p.chatMessageCount;
-      existing.handRaiseCount += p.handRaiseCount;
-      existing.reactionCount += p.reactionCount;
-      existing.speakingDurationSeconds += p.speakingDurationSeconds;
-      existing.attendanceDurationSeconds = Math.max(
-        existing.attendanceDurationSeconds,
-        p.attendanceDurationSeconds,
-      );
+      fold(existing, { ...p, displayName });
     } else {
-      merged.set(key, { ...p });
+      merged.set(key, { ...p, displayName });
     }
   }
 
   const you = merged.get('you');
-  if (you && merged.size >= 2) {
-    const others = Array.from(merged.entries()).filter(([k]) => k !== 'you');
-    if (others.length === 1) {
-      const [, other] = others[0]!;
-      other.chatMessageCount += you.chatMessageCount;
-      other.handRaiseCount += you.handRaiseCount;
-      other.speakingDurationSeconds += you.speakingDurationSeconds;
-      other.attendanceDurationSeconds = Math.max(other.attendanceDurationSeconds, you.attendanceDurationSeconds);
+  if (you && selfDisplayName) {
+    const selfKey = selfDisplayName.toLowerCase();
+    const selfRow = merged.get(selfKey);
+    if (selfRow) {
+      fold(selfRow, you);
       merged.delete('you');
+    } else {
+      // Rename You → real self name (do not merge into peers)
+      merged.delete('you');
+      merged.set(selfKey, { ...you, displayName: selfDisplayName });
     }
   }
 
-  return Array.from(merged.values());
+  return Array.from(merged.values()).filter((p) => isValidParticipantName(p.displayName));
 }

@@ -35,6 +35,7 @@ describe('blob.utils', () => {
 
   it('rejects invalid participant names', () => {
     expect(isValidParticipantName('1')).toBe(false);
+    expect(isValidParticipantName('More information about')).toBe(false);
     expect(isValidParticipantName('Umar Farook J')).toBe(true);
     expect(normalizeSelfName('You', 'Umar Farook J')).toBe('Umar Farook J');
   });

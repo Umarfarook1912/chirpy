@@ -1,5 +1,3 @@
-import { debugLog } from '../utils/debugLog';
-
 function forwardToBackground(
   requestId: string,
   messageType: string,
@@ -23,17 +21,6 @@ function forwardToBackground(
         );
         return;
       }
-
-      debugLog(
-        'webBridge.ts:forward',
-        'recording served to web',
-        {
-          recordingKey: response.recordingKey ?? payload.recordingKey ?? 'latest',
-          chunks: response.chunks?.length ?? 0,
-          blobSize: response.blobSize ?? 0,
-        },
-        'H-bridge',
-      );
 
       window.postMessage(
         {

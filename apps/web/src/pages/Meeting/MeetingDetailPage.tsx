@@ -18,7 +18,7 @@ import {
   revokeRecordingPreview,
   type ExtensionRecording,
 } from '../../utils/recording.utils';
-import { convertWebmToMp4 } from '../../utils/mp4.utils';
+import { convertWebmToMp4, resetFfmpegCache } from '../../utils/mp4.utils';
 import styles from './MeetingDetailPage.module.scss';
 
 export function MeetingDetailPage() {
@@ -34,6 +34,7 @@ export function MeetingDetailPage() {
   const [recordingLoading, setRecordingLoading] = useState(false);
   const [mp4Loading, setMp4Loading] = useState(false);
   const [mp4Progress, setMp4Progress] = useState(0);
+  const [mp4Label, setMp4Label] = useState('');
 
   const loadRecording = useCallback(async (key: string) => {
     setRecordingLoading(true);
@@ -83,17 +84,25 @@ export function MeetingDetailPage() {
     if (!recording) return;
     setMp4Loading(true);
     setMp4Progress(0);
+    setMp4Label('Starting conversion…');
     setRecordingError(null);
     try {
-      const mp4Blob = await convertWebmToMp4(recording.blob, setMp4Progress);
+      const mp4Blob = await convertWebmToMp4(recording.blob, (p) => {
+        setMp4Progress(p.percent);
+        setMp4Label(p.label);
+      });
       const safeTitle = (meeting?.title ?? recording.meetingTitle).replace(/[^\w\- ]+/g, '').trim();
       downloadBlob(mp4Blob, `${safeTitle || 'meeting'}.mp4`);
     } catch (err) {
+      resetFfmpegCache();
       const detail = err instanceof Error ? err.message : 'Unknown error';
-      setRecordingError(`MP4 conversion failed: ${detail}`);
+      setRecordingError(
+        `MP4 conversion failed: ${detail}. You can still use Download WebM (plays in Chrome/Edge/VLC).`,
+      );
     } finally {
       setMp4Loading(false);
       setMp4Progress(0);
+      setMp4Label('');
     }
   };
 
@@ -249,7 +258,7 @@ export function MeetingDetailPage() {
                 WebM plays in Chrome/Edge/VLC. Use Download MP4 for Windows Media Player.
               </Typography>
               <div className={styles.actions}>
-                <Button variant="secondary" size="sm" onClick={handleDownloadWebm}>
+                <Button variant="secondary" size="sm" onClick={handleDownloadWebm} disabled={mp4Loading}>
                   <Download size={16} />
                   Download WebM
                 </Button>
@@ -260,9 +269,24 @@ export function MeetingDetailPage() {
                   disabled={mp4Loading}
                 >
                   <Download size={16} />
-                  {mp4Loading ? `Converting… ${mp4Progress}%` : 'Download MP4'}
+                  {mp4Loading ? (mp4Label || `Converting… ${mp4Progress}%`) : 'Download MP4'}
                 </Button>
               </div>
+              {mp4Loading && (
+                <div className={styles.progressWrap} role="status" aria-live="polite">
+                  <div className={styles.progressMeta}>
+                    <Typography variant="caption" color="secondary">
+                      {mp4Label || 'Converting…'}
+                    </Typography>
+                    <Typography variant="caption" color="secondary">
+                      {mp4Progress}%
+                    </Typography>
+                  </div>
+                  <div className={styles.progressTrack}>
+                    <div className={styles.progressFill} style={{ width: `${mp4Progress}%` }} />
+                  </div>
+                </div>
+              )}
             </>
           ) : (
             <>

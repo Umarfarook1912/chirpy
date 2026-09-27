@@ -15,9 +15,13 @@ export class InteractionRepository {
     await db.interactions.where('sessionId').equals(sessionId).delete();
   }
 
+  /**
+   * Attendance = sum of present segments only (join→leave), not wall-clock first→last.
+   * Open segment at sync: lastJoin → sessionEndedAt (or now).
+   */
   async aggregateByParticipant(
     sessionId: string,
-    sessionDurationSeconds?: number,
+    sessionEndedAt?: number,
   ): Promise<
     Array<{
       participantName: string;
@@ -29,6 +33,7 @@ export class InteractionRepository {
     }>
   > {
     const interactions = await this.getBySession(sessionId);
+    const endTs = sessionEndedAt ?? Date.now();
 
     const byParticipant = new Map<string, LocalInteraction[]>();
     for (const interaction of interactions) {
@@ -38,64 +43,12 @@ export class InteractionRepository {
     }
 
     return Array.from(byParticipant.entries()).map(([participantName, events]) => {
-      // ── Chat & hand raise counts ────────────────────────────────────────
       const chatMessageCount = events.filter((e) => e.type === 'chat_message').length;
       const handRaiseCount = events.filter((e) => e.type === 'hand_raise').length;
       const reactionCount = events.filter((e) => e.type === 'reaction').length;
 
-      // ── Attendance: first join → last leave (or use precomputed duration) ─
-      const joins = events.filter((e) => e.type === 'join').map((e) => e.timestamp).sort((a, b) => a - b);
-      const leaves = events.filter((e) => e.type === 'leave').map((e) => e.timestamp).sort((a, b) => a - b);
-
-      // Sum up precomputed leave durations (stored in metadata.durationSeconds)
-      const precomputed = events
-        .filter((e) => e.type === 'leave' && typeof (e.metadata as Record<string, unknown> | undefined)?.durationSeconds === 'number')
-        .reduce((sum, e) => sum + ((e.metadata as Record<string, unknown>).durationSeconds as number), 0);
-
-      let attendanceDurationSeconds = precomputed;
-
-      // Fallback: compute from join/leave pairs
-      if (attendanceDurationSeconds === 0 && joins.length > 0) {
-        const latestLeave = leaves.length > 0 ? Math.max(...leaves) : Date.now();
-        const firstJoin = joins[0]!;
-        attendanceDurationSeconds = Math.max(1, Math.round((latestLeave - firstJoin) / 1_000));
-      }
-
-      // Last resort: use full session duration
-      if (attendanceDurationSeconds === 0 && sessionDurationSeconds) {
-        attendanceDurationSeconds = sessionDurationSeconds;
-      }
-
-      // ── Speaking: sum of precomputed durations from speaking_end metadata ─
-      const precomputedSpeaking = events
-        .filter(
-          (e) =>
-            e.type === 'speaking_end' &&
-            typeof (e.metadata as Record<string, unknown> | undefined)?.durationSeconds === 'number',
-        )
-        .reduce((sum, e) => sum + ((e.metadata as Record<string, unknown>).durationSeconds as number), 0);
-
-      // Fallback: compute from speaking_start / speaking_end pairs
-      let speakingDurationSeconds = precomputedSpeaking;
-      if (speakingDurationSeconds === 0) {
-        const starts = events
-          .filter((e) => e.type === 'speaking_start')
-          .map((e) => e.timestamp)
-          .sort((a, b) => a - b);
-        const ends = events
-          .filter((e) => e.type === 'speaking_end')
-          .map((e) => e.timestamp)
-          .sort((a, b) => a - b);
-
-        let endIdx = 0;
-        for (const start of starts) {
-          const matchingEnd = ends.find((e, i) => i >= endIdx && e > start);
-          if (matchingEnd) {
-            speakingDurationSeconds += Math.round((matchingEnd - start) / 1_000);
-            endIdx = ends.indexOf(matchingEnd) + 1;
-          }
-        }
-      }
+      const attendanceDurationSeconds = sumAttendanceSegments(events, endTs);
+      const speakingDurationSeconds = sumSpeakingSeconds(events);
 
       return {
         participantName,
@@ -107,4 +60,72 @@ export class InteractionRepository {
       };
     });
   }
+}
+
+export function sumAttendanceSegments(
+  events: Array<{ type: string; timestamp: number; metadata?: Record<string, unknown> }>,
+  sessionEndedAt: number,
+): number {
+  const timeline = [...events].sort((a, b) => a.timestamp - b.timestamp);
+  let attendance = 0;
+  let openJoin: number | null = null;
+
+  for (const event of timeline) {
+    if (event.type === 'join') {
+      openJoin = event.timestamp;
+      continue;
+    }
+    if (event.type === 'leave') {
+      const metaDuration = event.metadata?.['durationSeconds'];
+      if (typeof metaDuration === 'number' && metaDuration >= 0) {
+        attendance += metaDuration;
+        openJoin = null;
+        continue;
+      }
+      if (openJoin !== null) {
+        attendance += Math.max(0, Math.round((event.timestamp - openJoin) / 1_000));
+        openJoin = null;
+      }
+    }
+  }
+
+  // Still present at sync — count open segment only
+  if (openJoin !== null) {
+    attendance += Math.max(1, Math.round((sessionEndedAt - openJoin) / 1_000));
+  }
+
+  return attendance;
+}
+
+export function sumSpeakingSeconds(
+  events: Array<{ type: string; timestamp: number; metadata?: Record<string, unknown> }>,
+): number {
+  const precomputed = events
+    .filter(
+      (e) =>
+        e.type === 'speaking_end' && typeof e.metadata?.['durationSeconds'] === 'number',
+    )
+    .reduce((sum, e) => sum + (e.metadata!['durationSeconds'] as number), 0);
+
+  if (precomputed > 0) return precomputed;
+
+  const starts = events
+    .filter((e) => e.type === 'speaking_start')
+    .map((e) => e.timestamp)
+    .sort((a, b) => a - b);
+  const ends = events
+    .filter((e) => e.type === 'speaking_end')
+    .map((e) => e.timestamp)
+    .sort((a, b) => a - b);
+
+  let speaking = 0;
+  let endIdx = 0;
+  for (const start of starts) {
+    const matchingEnd = ends.find((e, i) => i >= endIdx && e > start);
+    if (matchingEnd) {
+      speaking += Math.round((matchingEnd - start) / 1_000);
+      endIdx = ends.indexOf(matchingEnd) + 1;
+    }
+  }
+  return speaking;
 }

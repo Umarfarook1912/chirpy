@@ -1,7 +1,6 @@
-import { GoogleMeetAdapter } from './adapters/GoogleMeetAdapter';
+import { GoogleMeetAdapter, getSelfDisplayName } from './adapters/GoogleMeetAdapter';
 import { RecordingOverlay } from './RecordingOverlay';
 import { EXTENSION_CONSTANTS } from '../constants/extension.constants';
-import { debugLog } from '../utils/debugLog';
 import type { MeetingInfo } from '../types/extension.types';
 import type { RecordingStatus } from '@chirpy/shared';
 import { isValidParticipantName, normalizeSelfName } from '../utils/blob.utils';
@@ -10,10 +9,7 @@ const recordingOverlay = new RecordingOverlay();
 
 // ─── Interaction relay ─────────────────────────────────────────────────────
 
-function getSelfDisplayName(): string {
-  const self = document.querySelector('[data-self-name][data-is-self], [data-self-name]');
-  return self?.getAttribute('data-self-name')?.trim() ?? 'You';
-}
+const pendingInteractionWrites: Promise<unknown>[] = [];
 
 async function storeInteraction(interaction: {
   sessionId: string;
@@ -23,11 +19,25 @@ async function storeInteraction(interaction: {
   metadata?: Record<string, unknown>;
 }): Promise<void> {
   const participantName = normalizeSelfName(interaction.participantName, getSelfDisplayName());
-  if (!isValidParticipantName(participantName)) return;
-  await chrome.runtime.sendMessage({
+  // Allow temporary "You" until real self name resolves; peers must still be valid names
+  if (!isValidParticipantName(participantName) && !/^you$/i.test(participantName)) return;
+
+  const write = chrome.runtime.sendMessage({
     type: 'STORE_INTERACTION',
     payload: { ...interaction, participantName },
   });
+  pendingInteractionWrites.push(write);
+  try {
+    await write;
+  } finally {
+    const idx = pendingInteractionWrites.indexOf(write);
+    if (idx >= 0) pendingInteractionWrites.splice(idx, 1);
+  }
+}
+
+async function flushPendingInteractions(): Promise<void> {
+  if (pendingInteractionWrites.length === 0) return;
+  await Promise.allSettled([...pendingInteractionWrites]);
 }
 
 // ─── State ─────────────────────────────────────────────────────────────────
@@ -41,6 +51,16 @@ let ignoreRecordingUiUpdates = false;
 let cleanupFns: Array<() => void> = [];
 let meetPort: chrome.runtime.Port | null = null;
 let sessionFinishedViaStop = false;
+/** Ensures every currently-visible Meet participant has a join event before sync. */
+let ensurePresenceSnapshot: (() => Promise<void>) | null = null;
+/** Closes any open speaking segments before sync. */
+let flushOpenSpeaking: (() => Promise<void>) | null = null;
+/**
+ * Best resolved self display name seen during the session.
+ * Updated every time getSelfDisplayName() returns a real name (not "You").
+ * Used at finish time so we don't fall back to "You" if the DOM has changed.
+ */
+let sessionSelfName = 'You';
 
 function isValidParticipant(name: string): boolean {
   if (!isValidParticipantName(name)) return false;
@@ -53,72 +73,141 @@ function isValidParticipant(name: string): boolean {
 
 // ─── Session lifecycle ─────────────────────────────────────────────────────
 
-function endSession(reason: string): void {
+function endSession(_reason: string): void {
   const sessionId = currentSessionId;
   const meeting = currentMeeting;
   if (!sessionId || isEndingSession || sessionFinishedViaStop) return;
 
   isEndingSession = true;
-  stopTracking();
 
-  meetPort?.postMessage({ type: 'SESSION_END', sessionId });
-  meetPort?.disconnect();
-  meetPort = null;
+  void (async () => {
+    await ensurePresenceSnapshot?.();
+    await flushOpenSpeaking?.();
+    await flushPendingInteractions();
+    const liveResolve = getSelfDisplayName();
+    const selfDisplayName = (liveResolve && !/^you$/i.test(liveResolve)) ? liveResolve : sessionSelfName;
 
-  void chrome.runtime
-    .sendMessage({
-      type: 'MEETING_ENDED',
-      payload: { sessionId, meeting: meeting ?? undefined },
-    })
-    .then((response) => {
+    stopTracking();
+
+    meetPort?.postMessage({ type: 'SESSION_END', sessionId });
+    meetPort?.disconnect();
+    meetPort = null;
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'MEETING_ENDED',
+        payload: { sessionId, meeting: meeting ?? undefined, selfDisplayName },
+      });
       if (response?.success) recordingOverlay.showSynced();
-    })
-    .finally(() => { isEndingSession = false; });
+    } finally {
+      isEndingSession = false;
+    }
+  })();
 }
 
 function startTracking(sessionId: string): void {
   currentSessionId = sessionId;
 
   // ── Participant join / leave tracking ──────────────────────────────────
-  // Keep the current set so we can emit leave events when someone disappears.
+  // Keys are lowercased; host/self joins at meeting.startedAt so late peers
+  // do not inherit the same attendance as the host.
   const presentParticipants = new Set<string>();
   const joinTimestamps = new Map<string, number>();
+  const displayByKey = new Map<string, string>();
+
+  const resolveName = (raw: string): string =>
+    normalizeSelfName(raw.trim(), getSelfDisplayName());
+
+  let selfName = resolveName(getSelfDisplayName());
+  if (selfName && !/^you$/i.test(selfName)) sessionSelfName = selfName;
+  let selfKey = selfName.toLowerCase();
+  const hostJoinAt = currentMeeting?.startedAt ?? Date.now();
+  if (isValidParticipant(selfName) || /^you$/i.test(selfName)) {
+    presentParticipants.add(selfKey);
+    joinTimestamps.set(selfKey, hostJoinAt);
+    displayByKey.set(selfKey, selfName);
+    void storeInteraction({
+      sessionId,
+      participantName: selfName,
+      type: 'join',
+      timestamp: hostJoinAt,
+    });
+  }
+
+  const applyPresence = (participants: Array<{ displayName: string }>) => {
+    const now = Date.now();
+
+    // If Meet later reveals the real self name, migrate the presence key
+    const resolvedSelf = resolveName(getSelfDisplayName());
+    if (resolvedSelf && !/^you$/i.test(resolvedSelf)) sessionSelfName = resolvedSelf;
+    const resolvedKey = resolvedSelf.toLowerCase();
+    if (resolvedKey !== selfKey && presentParticipants.has(selfKey)) {
+      presentParticipants.delete(selfKey);
+      presentParticipants.add(resolvedKey);
+      joinTimestamps.set(resolvedKey, joinTimestamps.get(selfKey) ?? hostJoinAt);
+      joinTimestamps.delete(selfKey);
+      displayByKey.set(resolvedKey, resolvedSelf);
+      displayByKey.delete(selfKey);
+      selfKey = resolvedKey;
+      selfName = resolvedSelf;
+    } else if (resolvedKey !== selfKey) {
+      selfKey = resolvedKey;
+      selfName = resolvedSelf;
+    }
+
+    const incomingKeys = new Set<string>();
+    const incomingDisplay = new Map<string, string>();
+
+    for (const p of participants) {
+      const name = resolveName(p.displayName);
+      if (!isValidParticipant(name) && !/^you$/i.test(name)) continue;
+      const key = name.toLowerCase();
+      incomingKeys.add(key);
+      incomingDisplay.set(key, name);
+    }
+    // Always treat self as present while tracking (avoids false leave when tile flickers)
+    incomingKeys.add(selfKey);
+    incomingDisplay.set(selfKey, selfName);
+
+    // New arrivals → join (self already recorded at meeting.startedAt)
+    for (const key of incomingKeys) {
+      if (presentParticipants.has(key)) continue;
+      const name = incomingDisplay.get(key)!;
+      const isSelf = key === selfKey || /^you$/i.test(name);
+      // First self join uses meeting start; rejoins use now
+      const joinAt = isSelf && !joinTimestamps.has(key) ? hostJoinAt : now;
+      presentParticipants.add(key);
+      joinTimestamps.set(key, joinAt);
+      displayByKey.set(key, name);
+      void storeInteraction({ sessionId, participantName: name, type: 'join', timestamp: joinAt });
+    }
+
+    // Departures → leave (never auto-leave self while session is active)
+    for (const key of [...presentParticipants]) {
+      if (incomingKeys.has(key)) continue;
+      if (key === selfKey) continue;
+      presentParticipants.delete(key);
+      const name = displayByKey.get(key) ?? key;
+      const joinedAt = joinTimestamps.get(key) ?? now;
+      const durationSeconds = Math.round((now - joinedAt) / 1_000);
+      void storeInteraction({
+        sessionId,
+        participantName: name,
+        type: 'leave',
+        timestamp: now,
+        metadata: { durationSeconds },
+      });
+    }
+  };
+
+  ensurePresenceSnapshot = async () => {
+    applyPresence(adapter.getVisibleParticipants());
+    await flushPendingInteractions();
+  };
 
   cleanupFns.push(
     adapter.onParticipantChange((participants) => {
-      const now = Date.now();
-      const incoming = new Set(
-        participants
-          .map((p) => p.displayName.trim())
-          .filter((n) => isValidParticipant(n)),
-      );
-
-      // New arrivals → join
-      for (const name of incoming) {
-        if (!presentParticipants.has(name)) {
-          presentParticipants.add(name);
-          joinTimestamps.set(name, now);
-          void storeInteraction({ sessionId, participantName: name, type: 'join', timestamp: now });
-          debugLog('content.ts:join', 'participant joined', { name }, 'H-participants');
-        }
-      }
-
-      // Departures → leave
-      for (const name of presentParticipants) {
-        if (!incoming.has(name)) {
-          presentParticipants.delete(name);
-          const joinedAt = joinTimestamps.get(name) ?? now;
-          const durationSeconds = Math.round((now - joinedAt) / 1_000);
-          void storeInteraction({
-            sessionId,
-            participantName: name,
-            type: 'leave',
-            timestamp: now,
-            metadata: { durationSeconds },
-          });
-          debugLog('content.ts:leave', 'participant left', { name, durationSeconds }, 'H-participants');
-        }
-      }
+      applyPresence(participants);
     }),
   );
 
@@ -126,7 +215,6 @@ function startTracking(sessionId: string): void {
   cleanupFns.push(
     adapter.onChatMessage((event) => {
       if (event.senderName === event.message) return;
-      debugLog('content.ts:onChatMessage', 'chat captured', { senderName: event.senderName, message: event.message.slice(0, 40) }, 'H-chat');
       void storeInteraction({ sessionId, participantName: event.senderName, type: 'chat_message', timestamp: event.timestamp });
     }),
   );
@@ -135,19 +223,20 @@ function startTracking(sessionId: string): void {
   const speakingStartTimes = new Map<string, number>();
 
   const trackSpeaking = (participantName: string, speaking: boolean) => {
+    const name = normalizeSelfName(participantName, getSelfDisplayName());
     const now = Date.now();
     if (speaking) {
-      if (speakingStartTimes.has(participantName)) return;
-      speakingStartTimes.set(participantName, now);
-      void storeInteraction({ sessionId, participantName, type: 'speaking_start', timestamp: now });
+      if (speakingStartTimes.has(name)) return;
+      speakingStartTimes.set(name, now);
+      void storeInteraction({ sessionId, participantName: name, type: 'speaking_start', timestamp: now });
     } else {
-      const started = speakingStartTimes.get(participantName);
+      const started = speakingStartTimes.get(name);
       if (started) {
-        speakingStartTimes.delete(participantName);
+        speakingStartTimes.delete(name);
         const durationSeconds = Math.max(1, Math.round((now - started) / 1_000));
         void storeInteraction({
           sessionId,
-          participantName,
+          participantName: name,
           type: 'speaking_end',
           timestamp: now,
           metadata: { durationSeconds },
@@ -159,10 +248,41 @@ function startTracking(sessionId: string): void {
   cleanupFns.push(adapter.onSpeakingChange(trackSpeaking));
   cleanupFns.push(adapter.onMicActivity(trackSpeaking));
 
+  flushOpenSpeaking = async () => {
+    const now = Date.now();
+    for (const [name, started] of speakingStartTimes.entries()) {
+      const durationSeconds = Math.max(1, Math.round((now - started) / 1_000));
+      await storeInteraction({
+        sessionId,
+        participantName: name,
+        type: 'speaking_end',
+        timestamp: now,
+        metadata: { durationSeconds },
+      });
+    }
+    speakingStartTimes.clear();
+  };
+
+  // Flush any open speaking segment when the session ends
+  cleanupFns.push(() => {
+    for (const [name, started] of speakingStartTimes.entries()) {
+      const durationSeconds = Math.max(1, Math.round((Date.now() - started) / 1_000));
+      void storeInteraction({
+        sessionId,
+        participantName: name,
+        type: 'speaking_end',
+        timestamp: Date.now(),
+        metadata: { durationSeconds },
+      });
+    }
+    speakingStartTimes.clear();
+  });
+
   // ── Hand raise ─────────────────────────────────────────────────────────
   cleanupFns.push(
     adapter.onHandRaise((participantName, timestamp) => {
-      debugLog('content.ts:handRaise', 'hand raised', { participantName }, 'H-interaction');
+      const resolvedSelf = getSelfDisplayName();
+      if (resolvedSelf && !/^you$/i.test(resolvedSelf)) sessionSelfName = resolvedSelf;
       void storeInteraction({ sessionId, participantName, type: 'hand_raise', timestamp });
     }),
   );
@@ -176,8 +296,11 @@ function startTracking(sessionId: string): void {
 function stopTracking(): void {
   for (const cleanup of cleanupFns) cleanup();
   cleanupFns = [];
+  ensurePresenceSnapshot = null;
+  flushOpenSpeaking = null;
   currentSessionId = null;
   currentMeeting = null;
+  sessionSelfName = 'You';
   adapter.destroy();
   adapter = new GoogleMeetAdapter();
 }
@@ -235,9 +358,24 @@ function applyFinishPanel(response: {
 }
 
 async function sendFinishMessage(sessionId: string, meeting: MeetingInfo | null): Promise<void> {
+  // Capture every visible person and close speaking segments BEFORE sync,
+  // otherwise the dashboard only sees the host row named "You".
+  await ensurePresenceSnapshot?.();
+  await flushOpenSpeaking?.();
+  await flushPendingInteractions();
+
+  // Prefer the name we cached during the session — getSelfDisplayName() may
+  // return "You" if the Meet DOM has already changed by the time we stop.
+  const liveResolve = getSelfDisplayName();
+  const selfDisplayName = (liveResolve && !/^you$/i.test(liveResolve)) ? liveResolve : sessionSelfName;
   const messagePromise = chrome.runtime.sendMessage({
     type: 'FINISH_MEETING_SESSION',
-    payload: { sessionId, meeting: meeting ?? undefined, suppressUi: true },
+    payload: {
+      sessionId,
+      meeting: meeting ?? undefined,
+      suppressUi: true,
+      selfDisplayName,
+    },
   }) as Promise<{ success?: boolean; meetingId?: string; recordingKey?: string; error?: string }>;
 
   const timeoutPromise = new Promise<{ success: false; error: string }>((resolve) => {
@@ -245,13 +383,6 @@ async function sendFinishMessage(sessionId: string, meeting: MeetingInfo | null)
   });
 
   const response = await Promise.race([messagePromise, timeoutPromise]);
-
-  debugLog('content.ts:handleRecordingStop', 'finish response', {
-    success: response?.success ?? false,
-    meetingId: response?.meetingId ?? null,
-    recordingKey: response?.recordingKey ?? null,
-    error: response?.error ?? null,
-  }, 'H-recording');
 
   sessionFinishedViaStop = true;
   stopTracking();

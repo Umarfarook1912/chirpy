@@ -40,8 +40,17 @@ export class ReportService {
     for (const i of interactions) {
       const name = i.displayName.trim();
       if (!name || /^Meet\b/i.test(name)) continue;
-      if (/^\d+$/.test(name.trim())) continue;
-      if (name.trim().length < 2) continue;
+      if (/^\d+$/.test(name)) continue;
+      if (name.length < 2 || name.length > 60) continue;
+      if (/\.{2,}/.test(name)) continue;                             // "Getting ready..."
+      if (/\bON$|\bOFF$/i.test(name)) continue;                     // "Video preview is ON"
+      if (/^(return|go to|getting|turn on|turn off|open|close|share screen|mute\b|unmute\b)/i.test(name)) continue;
+      if (/^more information/i.test(name)) continue;
+      if (/^(about|participants?|people|keep pin|backgrounds?|captions?|screen sharing)\b/i.test(name)) continue;
+      if (name.split(/\s+/).length > 5) continue;                   // Too many words → not a name
+      // Detect doubled names without space: "Umar Farook JUmar Farook J"
+      const half = Math.floor(name.length / 2);
+      if (half > 3 && name.slice(0, half) === name.slice(half)) continue;
 
       const key = name.toLowerCase();
       const cappedAttendance = Math.min(i.attendanceDurationSeconds, meetingDurationSeconds);
@@ -69,6 +78,30 @@ export class ReportService {
           speakingDurationSeconds: i.speakingDurationSeconds,
           participationScore: i.participationScore,
         });
+      }
+    }
+
+    // If "You" still exists as a row, absorb it into the participant who has
+    // the most attendance (almost always the meeting host / local user).
+    const youRow = merged.get('you');
+    if (youRow) {
+      merged.delete('you');
+      // Find the real-name row with the highest attendance to absorb "You" into
+      let bestKey = '';
+      let bestAtt = -1;
+      for (const [k, v] of merged) {
+        if (v.attendanceDurationSeconds > bestAtt) { bestAtt = v.attendanceDurationSeconds; bestKey = k; }
+      }
+      if (bestKey) {
+        const host = merged.get(bestKey)!;
+        host.chatMessageCount        += youRow.chatMessageCount;
+        host.handRaiseCount          += youRow.handRaiseCount;
+        host.reactionCount           += youRow.reactionCount;
+        host.speakingDurationSeconds += youRow.speakingDurationSeconds;
+        host.attendanceDurationSeconds = Math.max(host.attendanceDurationSeconds, youRow.attendanceDurationSeconds);
+      } else {
+        // No real name at all — keep "You" renamed if only 1 participant total
+        merged.set('you', { ...youRow, displayName: 'You' });
       }
     }
 

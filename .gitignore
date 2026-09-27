@@ -38,3 +38,6 @@ Thumbs.db
 
 # Chrome extension
 apps/extension/dist/
+
+# Vendored FFmpeg core (copied by apps/web/scripts/copy-ffmpeg.mjs on postinstall/dev)
+apps/web/public/ffmpeg/

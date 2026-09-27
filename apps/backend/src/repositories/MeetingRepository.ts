@@ -51,7 +51,23 @@ export class MeetingRepository {
     organizationId: string,
     externalMeetingId: string,
   ): Promise<MeetingDocument | null> {
-    return MeetingModel.findOne({ organizationId, externalMeetingId }).exec();
+    return MeetingModel.findOne({ organizationId, externalMeetingId })
+      .sort({ createdAt: -1 })
+      .exec();
+  }
+
+  /** Reusable call only while status is not completed/cancelled. */
+  async findOpenByExternalId(
+    organizationId: string,
+    externalMeetingId: string,
+  ): Promise<MeetingDocument | null> {
+    return MeetingModel.findOne({
+      organizationId,
+      externalMeetingId,
+      status: { $nin: ['completed', 'cancelled'] },
+    })
+      .sort({ createdAt: -1 })
+      .exec();
   }
 
   async update(

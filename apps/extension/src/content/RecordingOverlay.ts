@@ -1,6 +1,6 @@
 import type { RecordingStatus } from '@chirpy/shared';
 import { formatElapsedSeconds } from '../utils/format.utils';
-import { dataUrlToBlob, downloadBlobInPage } from '../utils/blob.utils';
+import { base64ChunksToBlob, downloadBlobInPage } from '../utils/blob.utils';
 
 const OVERLAY_ID = 'chirpy-recording-overlay';
 const POSITION_KEY = 'chirpy:overlayPosition';
@@ -321,18 +321,26 @@ export class RecordingOverlay {
       const response = (await chrome.runtime.sendMessage({ type, payload })) as {
         success?: boolean;
         error?: string;
-        dataUrl?: string;
-        filename?: string;
         downloaded?: boolean;
+        chunks?: string[];
+        mimeType?: string;
+        filename?: string;
       };
+      // Preferred path: background opens an extension download page (reliable for large WebMs)
       if (response?.success && response.downloaded) {
-        if (this.statusEl) this.statusEl.textContent = 'Download started — check your Downloads folder';
+        if (this.statusEl) {
+          this.statusEl.textContent = 'Download started — check your downloads bar';
+        }
+        if (this.timerEl) this.timerEl.textContent = 'Ready to download';
         return;
       }
-      if (response?.success && response.dataUrl && response.filename) {
-        const blob = dataUrlToBlob(response.dataUrl);
+      // Legacy fallback: chunks returned to the Meet page
+      if (response?.success && response.chunks?.length && response.filename) {
+        const blob = base64ChunksToBlob(response.chunks, response.mimeType ?? 'video/webm');
         downloadBlobInPage(blob, response.filename);
-        if (this.statusEl) this.statusEl.textContent = 'Download started — open the file to play';
+        if (this.statusEl) {
+          this.statusEl.textContent = 'Download started — open in Chrome, Edge, or VLC';
+        }
         return;
       }
       if (response?.success === false && response.error) {
